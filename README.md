@@ -1,8 +1,9 @@
 # Tern Custom Background
 
-A Tern plugin that puts a dithered picture behind the whole window — under the
-terminal, the sidebar, the tab bar and the status line — with a settings page
-to pick the image and the way it is drawn.
+A plugin for [Tern](https://stencil.so/tern), the terminal app by Stencil: it
+puts a dithered picture behind the whole window — under the terminal, the
+sidebar, the tab bar and the status line — with a settings page to pick the
+image and the way it is drawn.
 
 ## Install
 
