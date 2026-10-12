@@ -1,0 +1,35 @@
+/* Installed as a global sheet, so every rule is scoped to this block's own
+   surface. The surface attribute is the stable hook; the class names under it
+   are Tern's own.
+
+   One row's hint is a filesystem path, and a path is as long as the user's
+   folders are deep. At rest that wrapped to a dozen lines, which grew the row
+   to over a thousand pixels and pushed the page far past a narrow pane, so
+   every value change scrolled the page back to the top. Both the hint and the
+   field keep to one line and ellipsise instead: the field scrolls its own text
+   while it is being edited, so that rule stands aside then. */
+
+/* `ch` is not a length Tern parses (it takes px, em, %, vw and vh), so the
+   label's floor is in em: about the 14 characters it wants at this font. */
+[data-surface='plugin.wallpaper.settings'] .pf-row .pf-lbl {
+	min-width: 8em;
+}
+
+[data-surface='plugin.wallpaper.settings'] .pf-row .pf-lbl > .t {
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+[data-surface='plugin.wallpaper.settings'] .pf-row .pf-lbl > .h {
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+[data-surface='plugin.wallpaper.settings'] .pf-in:not(.editing) {
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	min-width: 0;
+}

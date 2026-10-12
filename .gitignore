@@ -1,0 +1,8 @@
+# Built by build.ps1 on first run. Shipping the binary would make the
+# "build it if it is missing" check skip the build, so edits to Dither.cs
+# would never reach it.
+engine/dither.exe
+engine/dither.stamp
+
+# Not published: a sample picture is not ours to redistribute.
+wp-test.jpg
