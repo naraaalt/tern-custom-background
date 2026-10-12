@@ -52,6 +52,10 @@ internal static class Dither
 	private static int extract = 8;
 	private static string extractMethod = "popularity";
 
+	// How many frames of an animated source to draw, 1 for a still. An image
+	// with fewer frames uses what it has.
+	private static int frames = 1;
+
 	private static readonly List<Color> customColors = new List<Color>();
 
 	// How far apart two entries of an extracted palette have to be, squared and
@@ -82,87 +86,105 @@ internal static class Dither
 
 			Stopwatch sw = Stopwatch.StartNew();
 
-			using (Bitmap source = LoadImage(inPath))
+			// The image is held open for the whole run: GDI+ reads a frame out
+			// of the stream on every SelectActiveFrame, so the stream has to
+			// outlive the last frame read from it.
+			using (FileStream fs = File.OpenRead(inPath))
+			using (Image img = Image.FromStream(fs, true, true))
 			{
-				int sw0 = source.Width;
-				int sh0 = source.Height;
+				int sw0 = img.Width;
+				int sh0 = img.Height;
 
-				Size outSize = FitSize(sw0, sh0);
-				using (Bitmap small = Downscale(source, outSize.Width, outSize.Height))
+				int count = FrameCount(img);
+				int use = Math.Max(1, Math.Min(frames, count));
+				int[] picked;
+				int[] delays;
+				PickFrames(FrameDelays(img, count), count, use, out picked, out delays);
+
+				// The cell is one frame's dithered picture; the grid holds them
+				// all, because the window can only be handed one image.
+				Size cell = FitSize(sw0, sh0);
+				int cols = 1;
+				int rows = 1;
+				if (use > 1)
 				{
-					List<Color> palette = paletteName == "auto"
-						? PaletteFromImage(source, sw0, sh0)
-						: BuildPalette();
-					int w = small.Width;
-					int h = small.Height;
-
-					double[] px = ReadPixels(small, w, h);
-					ApplyTone(px);
-
-					int[] index = new int[w * h];
-					if (mode == "bayer")
-					{
-						Ordered(px, w, h, palette, index, Bayer(matrix), matrix);
-					}
-					else if (mode == "bluenoise")
-					{
-						Ordered(px, w, h, palette, index, BlueNoise(), BLUE_SIDE);
-					}
-					else if (mode == "knoll")
-					{
-						Knoll(px, w, h, palette, index);
-					}
-					else if (mode == "riemersma")
-					{
-						Riemersma(px, w, h, palette, index);
-					}
-					else if (mode == "threshold")
-					{
-						Threshold(px, w, h, palette, index);
-					}
-					else if (mode == "none")
-					{
-						Nearest(px, w, h, palette, index);
-					}
-					else
-					{
-						double[] kernel = Kernel(algo);
-						if (kernel == null)
-						{
-							Dizzy(px, w, h, palette, index);
-						}
-						else
-						{
-							Diffuse(px, w, h, palette, index, kernel);
-						}
-					}
-
-					// The pixelate pass runs over the dithered result, so it
-					// blocks up the dither pattern rather than the picture, and
-					// the size it gives back is the size that gets written.
-					if (pixelate > 1)
-					{
-						int pw;
-						int ph;
-						index = Pixelate(index, w, h, palette, out pw, out ph);
-						w = pw;
-						h = ph;
-					}
-
-					WritePng(index, w, h, palette, outPath);
-
-					long bytes = new FileInfo(outPath).Length;
-					string line = string.Format(CultureInfo.InvariantCulture,
-						"src={0}x{1} out={2}x{3} px={4} ms={5} bytes={6}",
-						sw0, sh0, w, h, w * h, sw.ElapsedMilliseconds, bytes);
-					// The palette is the render's own answer, and the only place
-					// it can be read back: the caller asked for it by name.
-					if (paletteName == "auto")
-					{
-						line += " palette=" + HexList(palette);
-					}
-					Console.WriteLine(line);
+					cols = (int)Math.Ceiling(Math.Sqrt(use));
+					rows = (int)Math.Ceiling((double)use / cols);
+					cell = FitAtlas(cell, cols, rows);
 				}
+
+				// The palette comes off the first frame and is used for every
+				// one: a palette per frame would make the colours crawl.
+				List<Color> palette = paletteName == "auto"
+					? PaletteFromImage(CompositeFrame(img, picked[0]), sw0, sh0)
+					: BuildPalette();
+
+				// The pixelate pass runs over the dithered result, so it blocks
+				// up the dither pattern rather than the picture, and the size it
+				// gives back is the size that gets written. It is computed here
+				// because every cell has to come out the same size for the grid
+				// to line up.
+				int w = cell.Width;
+				int h = cell.Height;
+				if (pixelate > 1)
+				{
+					w = Math.Max(1, (w + pixelate - 1) / pixelate);
+					h = Math.Max(1, (h + pixelate - 1) / pixelate);
+				}
+
+				int aw = w * cols;
+				int ah = h * rows;
+				int[] atlas = new int[aw * ah];
+
+				for (int f = 0; f < use; f++)
+				{
+					using (Bitmap frame = CompositeFrame(img, picked[f]))
+					using (Bitmap small = Downscale(frame, cell.Width, cell.Height))
+					{
+						double[] px = ReadPixels(small, cell.Width, cell.Height);
+						ApplyTone(px);
+
+						int[] index = new int[cell.Width * cell.Height];
+						DitherCell(px, cell.Width, cell.Height, palette, index);
+
+						if (pixelate > 1)
+						{
+							int pw;
+							int ph;
+							index = Pixelate(index, cell.Width, cell.Height, palette, out pw, out ph);
+						}
+
+						Blit(atlas, aw, (f % cols) * w, (f / cols) * h, w, h, index);
+					}
+				}
+
+				WritePng(atlas, aw, ah, palette, outPath);
+
+				long bytes = new FileInfo(outPath).Length;
+				string line = string.Format(CultureInfo.InvariantCulture,
+					"src={0}x{1} out={2}x{3} px={4} ms={5} bytes={6}",
+					sw0, sh0, aw, ah, aw * ah, sw.ElapsedMilliseconds, bytes);
+				// The palette is the render's own answer, and the only place
+				// it can be read back: the caller asked for it by name.
+				if (paletteName == "auto")
+				{
+					line += " palette=" + HexList(palette);
+				}
+				// An animation's grid and its per-frame times. The caller reads
+				// these back to build the keyframes; the image alone does not
+				// say where one frame ends and the next begins.
+				if (use > 1)
+				{
+					string[] parts = new string[delays.Length];
+					for (int i = 0; i < delays.Length; i++)
+					{
+						parts[i] = delays[i].ToString(CultureInfo.InvariantCulture);
+					}
+					line += string.Format(CultureInfo.InvariantCulture,
+						" frames={0} cell={1}x{2} cols={3} rows={4} delays={5}",
+						use, w, h, cols, rows, string.Join(",", parts));
+				}
+				Console.WriteLine(line);
 			}
 
 			return 0;
@@ -171,6 +193,48 @@ internal static class Dither
 		{
 			Console.Error.WriteLine("dither: " + ex.Message);
 			return 1;
+		}
+	}
+
+	// The dither itself, on one frame's pixels. Split out of Main because an
+	// animation runs it once per frame, into one cell of the grid.
+	private static void DitherCell(double[] px, int w, int h, List<Color> palette, int[] index)
+	{
+		if (mode == "bayer")
+		{
+			Ordered(px, w, h, palette, index, Bayer(matrix), matrix);
+		}
+		else if (mode == "bluenoise")
+		{
+			Ordered(px, w, h, palette, index, BlueNoise(), BLUE_SIDE);
+		}
+		else if (mode == "knoll")
+		{
+			Knoll(px, w, h, palette, index);
+		}
+		else if (mode == "riemersma")
+		{
+			Riemersma(px, w, h, palette, index);
+		}
+		else if (mode == "threshold")
+		{
+			Threshold(px, w, h, palette, index);
+		}
+		else if (mode == "none")
+		{
+			Nearest(px, w, h, palette, index);
+		}
+		else
+		{
+			double[] kernel = Kernel(algo);
+			if (kernel == null)
+			{
+				Dizzy(px, w, h, palette, index);
+			}
+			else
+			{
+				Diffuse(px, w, h, palette, index, kernel);
+			}
 		}
 	}
 
@@ -190,6 +254,8 @@ internal static class Dither
 		Console.Error.WriteLine("              | auto, the colours taken from the image             (bw)");
 		Console.Error.WriteLine("  --extract   colours to take from the image, 2..256               (8)");
 		Console.Error.WriteLine("  --extract-method  popularity | median                            (popularity)");
+		Console.Error.WriteLine("  --frames    frames of an animated source to draw, 1..48          (1)");
+		Console.Error.WriteLine("              an atlas of ceil(sqrt(N)) columns is written instead");
 		Console.Error.WriteLine("  --scale     integer downscale divisor, 1..16                     (1)");
 		Console.Error.WriteLine("  --max       cap the longest output side at N pixels              (none)");
 		Console.Error.WriteLine("  --threshold 0..1, the cut used by the bw palette                 (0.5)");
@@ -254,6 +320,9 @@ internal static class Dither
 				case "--extract-method":
 					if (v == null) return false;
 					extractMethod = v.ToLowerInvariant(); i++; break;
+				case "--frames":
+					if (v == null) return false;
+					frames = int.Parse(v, CultureInfo.InvariantCulture); i++; break;
 				case "--invert":
 					invert = true; break;
 				default:
@@ -279,6 +348,8 @@ internal static class Dither
 		if (cut > 1.0) cut = 1.0;
 		if (extract < 2) extract = 2;
 		if (extract > 256) extract = 256;
+		if (frames < 1) frames = 1;
+		if (frames > 48) frames = 48;
 
 		if (extractMethod != "popularity" && extractMethod != "median")
 		{
@@ -379,28 +450,161 @@ internal static class Dither
 	// GDI+ decodes JPEG, PNG, BMP, GIF and TIFF. It has no WebP decoder unless
 	// a system codec is installed, and that failure is reported rather than
 	// guessed at.
-	private static Bitmap LoadImage(string path)
+	//
+	// One frame, drawn onto a full-size 32bpp canvas. GDI+ hands back a
+	// complete frame for a GIF rather than the partial update the file stores,
+	// so no compositing of frames is needed here; the copy is what turns the
+	// frame into a bitmap this code can read and scale.
+	private static Bitmap CompositeFrame(Image img, int index)
 	{
 		try
 		{
-			using (FileStream fs = File.OpenRead(path))
+			Guid[] dims = img.FrameDimensionsList;
+			if (dims != null && dims.Length > 0)
 			{
-				using (Image img = Image.FromStream(fs, true, true))
-				{
-					Bitmap copy = new Bitmap(img.Width, img.Height, PixelFormat.Format32bppArgb);
-					using (Graphics g = Graphics.FromImage(copy))
-					{
-						g.CompositingMode = CompositingMode.SourceCopy;
-						g.InterpolationMode = InterpolationMode.NearestNeighbor;
-						g.DrawImage(img, new Rectangle(0, 0, img.Width, img.Height));
-					}
-					return copy;
-				}
+				img.SelectActiveFrame(new FrameDimension(dims[0]), index);
 			}
+
+			Bitmap copy = new Bitmap(img.Width, img.Height, PixelFormat.Format32bppArgb);
+			using (Graphics g = Graphics.FromImage(copy))
+			{
+				g.CompositingMode = CompositingMode.SourceCopy;
+				g.InterpolationMode = InterpolationMode.NearestNeighbor;
+				g.DrawImage(img, new Rectangle(0, 0, img.Width, img.Height));
+			}
+			return copy;
 		}
 		catch (Exception ex)
 		{
-			throw new Exception("cannot decode " + Path.GetFileName(path) + ": " + ex.Message);
+			throw new Exception("cannot decode " + Path.GetFileName(inPath) + ": " + ex.Message);
+		}
+	}
+
+	// How many frames the image holds. A still image, and anything GDI+ will
+	// not answer for, is one frame.
+	private static int FrameCount(Image img)
+	{
+		try
+		{
+			Guid[] dims = img.FrameDimensionsList;
+			if (dims == null || dims.Length == 0)
+			{
+				return 1;
+			}
+			return Math.Max(1, img.GetFrameCount(new FrameDimension(dims[0])));
+		}
+		catch
+		{
+			return 1;
+		}
+	}
+
+	// The delay of each frame in milliseconds. A GIF stores them as hundredths
+	// of a second in property 0x5100, one little-endian 32-bit word per frame;
+	// a frame that asks for no delay gets the 100 ms browsers fall back to, or
+	// a GIF that sets none at all would animate at the frame rate of the
+	// display.
+	private static int[] FrameDelays(Image img, int count)
+	{
+		const int FALLBACK_MS = 100;
+		int[] ms = new int[count];
+		bool have = false;
+
+		try
+		{
+			PropertyItem pi = img.GetPropertyItem(0x5100);
+			int n = pi.Value.Length / 4;
+			for (int i = 0; i < count; i++)
+			{
+				int hundredths = i < n ? BitConverter.ToInt32(pi.Value, i * 4) : 0;
+				ms[i] = hundredths > 0 ? hundredths * 10 : FALLBACK_MS;
+			}
+			have = true;
+		}
+		catch
+		{
+			// No property: not an animation, or one that sets no delays.
+		}
+
+		if (!have)
+		{
+			for (int i = 0; i < count; i++)
+			{
+				ms[i] = FALLBACK_MS;
+			}
+		}
+		return ms;
+	}
+
+	// Which frames to draw, and how long each is held. Asking for fewer frames
+	// than the image has samples them evenly and adds the delays of the ones it
+	// skips to the frame that stands in for them, so the animation keeps its
+	// length and its pace rather than running fast.
+	private static void PickFrames(int[] all, int count, int use, out int[] picked, out int[] delays)
+	{
+		picked = new int[use];
+		delays = new int[use];
+
+		for (int j = 0; j < use; j++)
+		{
+			int from = (int)((long)j * count / use);
+			int to = (int)((long)(j + 1) * count / use);
+			if (to <= from)
+			{
+				to = from + 1;
+			}
+			if (to > count)
+			{
+				to = count;
+			}
+
+			picked[j] = from;
+			int sum = 0;
+			for (int i = from; i < to; i++)
+			{
+				sum += all[i];
+			}
+			delays[j] = sum > 0 ? sum : 100;
+		}
+	}
+
+	// An atlas of every frame is `cols` cells wide and `rows` cells tall, and
+	// Tern refuses a CSS image longer than 4096 px on a side, so the cell
+	// shrinks until the grid fits. Fewer, larger frames beat more, tiny ones,
+	// which is why the caller picks the frame count and this only reacts.
+	private const int ATLAS_SIDE = 4096;
+
+	private static Size FitAtlas(Size cell, int cols, int rows)
+	{
+		double f = 1.0;
+		if ((double)cell.Width * cols > ATLAS_SIDE)
+		{
+			f = Math.Min(f, (double)ATLAS_SIDE / (cell.Width * cols));
+		}
+		if ((double)cell.Height * rows > ATLAS_SIDE)
+		{
+			f = Math.Min(f, (double)ATLAS_SIDE / (cell.Height * rows));
+		}
+		if (f >= 1.0)
+		{
+			return cell;
+		}
+
+		// Floored, not rounded: rounding up a cell can put the grid back over
+		// the limit it was just scaled to fit (six columns of a cell rounded
+		// from 682.67 to 683 are 4098 px wide, and Tern refuses the image).
+		// The clamp is the same guarantee for a cell so small that the scale
+		// rounds it to zero.
+		return new Size(
+			Math.Max(1, Math.Min(ATLAS_SIDE / cols, (int)Math.Floor(cell.Width * f))),
+			Math.Max(1, Math.Min(ATLAS_SIDE / rows, (int)Math.Floor(cell.Height * f))));
+	}
+
+	private static void Blit(int[] atlas, int aw, int ox, int oy, int w, int h, int[] cell)
+	{
+		for (int y = 0; y < h; y++)
+		{
+			Array.Copy(cell, y * w, atlas, (oy + y) * aw + ox, w);
 		}
 	}
 

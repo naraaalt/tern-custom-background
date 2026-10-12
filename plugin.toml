@@ -1,7 +1,7 @@
 schema = 1
 id = "wallpaper"
 name = "Wallpaper"
-version = "0.5.0"
+version = "0.6.0"
 description = "A dithered image behind the whole window, with a settings page."
 icon = "image"
 host = "host.luau"

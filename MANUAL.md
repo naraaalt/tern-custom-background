@@ -53,6 +53,14 @@ plugin reload` does it straight away (see the engine's stamp below).
 - **Use dropped images** (off by default) makes a dropped image file the
   source. It is off because claiming a drop takes it away from the terminal,
   which normally inserts the path.
+- **Animate** (on by default) moves an animated source: an animated GIF's
+  frames are dithered one by one into a grid image and the sheet steps through
+  them at the GIF's own delays. **Frames** (2–48, 12 by default) says how many
+  are drawn; a source with fewer uses what it has, and each extra frame shrinks
+  the cells so the grid still fits inside Tern's 4096 px limit. A still image
+  renders the same either way. While an animation is up the Fit row reads
+  `cover` and is disabled, because the frames only line up as one grid; the
+  stored choice comes back when the picture is still again.
 
 ## Settings
 
@@ -69,6 +77,8 @@ plugin reload` does it straight away (see the engine's stamp below).
 | Chosen by | most used, median cut | most used |
 | Pixel scale | 1–16, divides the source before the dither | 1 |
 | Longest side | 1280/1920/2560/3840/4096 | 1920 |
+| Animate | on/off, moves an animated source | on |
+| Frames | 2–48, how many frames the picture is sampled into | 12 |
 | Threshold | 0–100% | 50% |
 | Brightness | −100–100% | 0% |
 | Contrast | 10–300% | 100% |
@@ -88,10 +98,14 @@ the plugin first loads.
 window.luau  ── the style sheet: paints the picture once on the window itself
                 (body), with a black scrim whose alpha is 1 - opacity, and
                 clears the fills the app draws over it. Polls render_rev.
+                With an animated render it paints one cell of the grid at a
+                time instead, driven by @keyframes built from the delays.
 host.luau    ── the render loop and the settings block. Polls rev, runs
-                engine/dither.exe, writes picture, render, sig and render_rev,
-                and with the Image colours palette writes back the palette the
-                engine read off the picture.
+                engine/dither.exe, writes picture, render, sig, render_rev and
+                the animation's grid (anim_frames, anim_cols, anim_rows,
+                anim_cell_w, anim_cell_h, anim_delays), and with the Image
+                colours palette writes back the palette the engine read off
+                the picture.
 engine/      ── Dither.cs, built to dither.exe by build.ps1.
 data/renders ── the rendered PNGs, in the plugin's data folder. The newest
                 four are kept.
@@ -116,6 +130,50 @@ The picture goes on `body` now, which is the whole window, so `fit` means
 what it says: the screen. `background-attachment` is not a property Tern
 parses, so a fixed-position layer behind four surfaces is not available;
 one sheet on the window is the way to get one crop.
+
+### An animation is one image
+
+A GIF's frames are dithered separately and laid out in one grid — 12 frames as
+4×3 — because a sheet can only be handed one image. The window half then walks
+that grid with a `@keyframes` rule: one keyframe per frame, each moving
+`background-position` by exactly one cell, with `animation-timing-function:
+step-end` so each frame holds for its own time instead of sliding into the
+next. The keyframe offsets are the delays the engine read out of the GIF and
+summed, so the animation runs at the speed the file asked for; the same
+numbers come back in the render's `delays=` field.
+
+The grid is what makes the crop work. The sheet sizes the *whole grid* as if
+it were one frame — `calc(cols * max(100vw, A * 100vh))` — and then positions
+it so cell *k* sits where a single frame would have been; that is the same
+`cover` crop the still sheet gets from `center`, which is why a still and an
+animation of the same source line up.
+
+Verified two ways. Deterministically: with the timeline frozen (`tern ctl
+motion-at`), a 4-frame render of a file whose frames are 1000/500/1000/500 ms
+of flat black, white, black, white reads black, white, black, white at 100,
+1200, 1800 and 2700 ms — the frames appear in the file's order and are held
+for the file's own times. And against the atlas: seeking a 12-frame render to
+each frame's midpoint and comparing the window with the cell it should be
+showing agrees on 96.8% of the samples that are pure black or white on both
+sides, with the residual spread evenly over one-pixel shifts (96.8% at 0 and
+±1, 95.5% at ±2, ±3). So the crop is centred to within a pixel of sampling
+tolerance, not off by a cell.
+
+The engine shrinks the cell until the grid fits: `ceil(sqrt(N))` columns and
+`ceil(N / cols)` rows, scaled down by the same factor on both axes when either
+side would pass 4096 px. The scaled size is **floored**, not rounded — six
+columns of a cell rounded from 682.67 to 683 are 4098 px wide, and Tern
+refuses the image — and clamped to `4096 / cols` as a second guarantee.
+
+`animate` off, or a source with one frame, renders one cell and clears the six
+`anim_*` keys, so the window half is back on the still path with nothing to
+unlearn. `Fit` is forced to `cover` while an animation is up and the row says
+so: `contain` and `tile` would show the neighbouring cells, because the cell's
+edges are inside the image rather than at its edge.
+
+Reduced motion is honoured: the sheet's `@media (prefers-reduced-motion:
+reduce)` block drops the animation and leaves the first frame up. Tern does
+not do this for you.
 
 ### The fills the app draws over the picture
 
@@ -248,7 +306,7 @@ dither.exe --in <path> --out <path>
            [--pixelate 1..25] [--smooth]
            [--palette bw|gray4|gray8|gray16|auto|custom:#rrggbb,...]
            [--extract N] [--extract-method popularity|median]
-           [--scale 1..16] [--max N]
+           [--scale 1..16] [--max N] [--frames 1..48]
            [--threshold 0..1] [--brightness -1..1] [--contrast 0..3]
            [--invert]
 ```
@@ -258,7 +316,9 @@ stderr for a bad option, a missing file or an image it cannot decode. A
 two-colour palette is written as 1-bit PNG, up to 256 colours as 8-bit, and
 anything larger as 24-bit. With `--palette auto` the colours it settled on
 follow the status line as `palette=#rrggbb,...`, which is how the block reads
-them back.
+them back. With `--frames` above 1 it adds `frames=N cell=WxH cols=C rows=R
+delays=ms,ms,...`, which is how the window half knows where one frame ends and
+the next begins.
 
 `--algo`, `--matrix` and `--pattern` are only read by the mode that uses them,
 and the block disables the row of each while another mode is running.
@@ -346,6 +406,14 @@ and the preview is the render itself rather than a second one.
   model, so editing a path means pressing Backspace or Home first.
 - **WebP needs a system codec.** GDI+ decodes JPEG, PNG, BMP, GIF and TIFF.
   A WebP without a codec fails with `cannot decode`.
+- **An animation is always `cover`, and its frames share one palette.** The
+  frames are one image, so only the crop that shows one cell at a time can be
+  drawn; and the palette is read off the first frame, because a palette per
+  frame would make the colours crawl as the picture moves.
+- **Frames are sampled evenly, and their delays are added up.** Asking for
+  fewer frames than the file has keeps the animation's length and pace: the
+  skipped frames' delays go to the frame that stands in for them. 12 frames of
+  a 31-frame GIF is what the default does.
 - **One render at a time.** While a render runs the loop ignores new changes;
   the debounce picks up the newest settings when it fires.
 - **The pane width decides the layout.** The `prefs` kind collapses its nav to

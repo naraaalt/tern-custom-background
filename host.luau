@@ -70,6 +70,8 @@ local DEFAULTS = {
 	contrast = 1,
 	invert = false,
 	maxside = 1920,
+	animate = true,
+	frames = 12,
 	opacity = 0.30,
 	fit = "cover",
 	pixelated = false,
@@ -80,9 +82,22 @@ local DEFAULTS = {
 local KEYS = {
 	"source", "mode", "algo", "matrix", "pattern", "pixelate", "smooth",
 	"palette", "colors", "extract", "extract_method", "scale", "cut",
-	"brightness", "contrast", "invert", "maxside", "opacity", "fit", "pixelated", "enabled",
-	"claim",
+	"brightness", "contrast", "invert", "maxside", "animate", "frames",
+	"opacity", "fit", "pixelated", "enabled", "claim",
 }
+
+-- The animation the render in hand came out as, written by the render loop
+-- from the engine's own report and read by both halves. They are separate
+-- keys rather than one table because the window half reads them with the
+-- same typed accessors as everything else.
+local ANIM_KEYS = {
+	"anim_frames", "anim_cols", "anim_rows", "anim_cell_w", "anim_cell_h", "anim_delays",
+}
+
+-- The most frames the engine will draw, and the most that is useful: past a
+-- couple of dozen the grid shrinks every cell and the animation reads as a
+-- flip book rather than a moving picture.
+local MAX_FRAMES = 48
 
 -- The engine's modes, in the order the menu lists them: the error diffusions
 -- first, then the ordered ones, then the two that do not dither at all.
@@ -143,6 +158,13 @@ end
 
 local function clamp(v: number, lo: number, hi: number): number
 	return math.max(lo, math.min(hi, v))
+end
+
+-- Whether the render that is up is an animation. The key is the render's own
+-- answer, not a setting: a still source with `animate` on renders one cell
+-- and leaves it unset.
+local function animated(): boolean
+	return knum("anim_frames", 0) > 1
 end
 
 -- The window half gets its picture through the kv store, which holds JSON
@@ -209,6 +231,8 @@ local function settings(): { [string]: any }
 	s.contrast = clamp(knum("contrast", DEFAULTS.contrast), 0.1, 3)
 	s.invert = kbool("invert", DEFAULTS.invert)
 	s.maxside = clamp_maxside(knum("maxside", DEFAULTS.maxside))
+	s.animate = kbool("animate", DEFAULTS.animate)
+	s.frames = clamp(math.floor(knum("frames", DEFAULTS.frames)), 2, MAX_FRAMES)
 	s.opacity = clamp(knum("opacity", DEFAULTS.opacity), 0, 1)
 	s.fit = one_of(kstr("fit", DEFAULTS.fit), FITS, DEFAULTS.fit)
 	s.pixelated = kbool("pixelated", DEFAULTS.pixelated)
@@ -272,6 +296,12 @@ local function engine_stamp(): string
 	return "none"
 end
 
+-- How many frames this render asks the engine for. One is the engine's
+-- still: an animated source then comes out as its first frame, in one cell.
+local function use_frames(s: { [string]: any }): number
+	return if s.animate then s.frames else 1
+end
+
 -- The render inputs, as one string. Display-only settings are deliberately
 -- absent: changing the opacity must not re-dither the picture. A setting is
 -- only an input while the palette in use reads it: the colours are the Custom
@@ -281,7 +311,7 @@ local function signature(s: { [string]: any }): string
 	local parts = {
 		engine_stamp(), tostring(s.source), tostring(s.mode), tostring(s.palette),
 		fixed(s.scale), fixed(s.cut), fixed(s.brightness), fixed(s.contrast),
-		tostring(s.invert), fixed(s.maxside),
+		tostring(s.invert), fixed(s.maxside), tostring(use_frames(s)),
 	}
 	-- Only the setting the mode reads goes in: a matrix while the diffusions
 	-- are running is not a render, and neither is a pattern under Bayer.
@@ -353,6 +383,10 @@ local function render_argv(s: { [string]: any }, out: string): { string }
 	-- draw a picture whose side is longer than that.
 	table.insert(argv, "--max")
 	table.insert(argv, tostring(s.maxside))
+	-- Always passed too: 1 is the engine's still, which is what a source with
+	-- one frame renders as whatever this says.
+	table.insert(argv, "--frames")
+	table.insert(argv, tostring(use_frames(s)))
 	return argv
 end
 
@@ -447,6 +481,38 @@ local function extracted_palette(text: string): string?
 	return string.match(text, "palette=([#%x,]+)")
 end
 
+-- The grid and per-frame times of an animated render, as the engine reports
+-- them: "frames=8 cell=640x360 cols=3 rows=3 delays=100,100,...". Nothing
+-- else in the render says where one frame ends and the next begins, so this
+-- is what the window half turns into keyframes. nil for a still.
+local function render_animation(text: string): { [string]: any }?
+	local n, cw, ch, cols, rows, delays =
+		string.match(text, "frames=(%d+) cell=(%d+)x(%d+) cols=(%d+) rows=(%d+) delays=([%d,]+)")
+	if n == nil then
+		return nil
+	end
+	local frames = tonumber(n) :: number
+	if frames < 2 then
+		return nil
+	end
+	return {
+		frames = frames,
+		cols = tonumber(cols) :: number,
+		rows = tonumber(rows) :: number,
+		cell_w = tonumber(cw) :: number,
+		cell_h = tonumber(ch) :: number,
+		delays = delays :: string,
+	}
+end
+
+-- The animation the window half should draw, or nil for a still. `kv.set`
+-- deletes a key when the value is nil, so clearing is the same call.
+local function publish_animation(anim: { [string]: any }?)
+	for _, key in ANIM_KEYS do
+		tern.kv.set(key, if anim == nil then nil else anim[string.sub(key, 6)])
+	end
+end
+
 local function apply_render(rev: number, s: { [string]: any })
 	inflight = true
 	local out = render_path(next_render())
@@ -480,9 +546,15 @@ local function apply_render(rev: number, s: { [string]: any })
 					end
 					text = text:gsub("%s*palette=[#%x,]+", "")
 				end
+				-- Read before the note drops it: the per-frame times are a list
+				-- as long as the frame count, and the Frames row already says
+				-- the count, so the note keeps the grid and loses the list.
+				local anim = render_animation(text)
+				text = text:gsub("%s*delays=[%d,]+", "")
 				tern.kv.set("render", out)
 				tern.kv.set("picture", url)
 				tern.kv.set("sig", sig)
+				publish_animation(anim)
 				note(text)
 				prune(out)
 			else
@@ -965,6 +1037,21 @@ local function rows_for(state: State): { { [string]: any } }
 					{ value = tostring(MAX_SIDE), label = tostring(MAX_SIDE) },
 				} },
 			},
+			{
+				id = "animate",
+				label = "Animate",
+				hint = "An animated source moves. A still one renders the same either way.",
+				control = { k = "switch", on = s.animate },
+			},
+			{
+				id = "frames",
+				label = "Frames",
+				hint = "How many the picture is sampled into. Each one shrinks the "
+					.. "cells until the grid fits in 4096 px; a source with fewer "
+					.. "frames uses what it has.",
+				disabled = if s.animate then nil else "Used once Animate is on.",
+				control = { k = "number", value = s.frames, min = 2, max = MAX_FRAMES },
+			},
 		}
 	end
 
@@ -1006,8 +1093,14 @@ local function rows_for(state: State): { { [string]: any } }
 			{
 				id = "fit",
 				label = "Fit",
-				hint = "How the picture meets the window.",
-				control = { k = "choice", value = s.fit, options = {
+				hint = if animated()
+					then "An animation fills the screen: the frames only line up as one grid."
+					else "How the picture meets the window.",
+				-- The value is what is drawn, not what is stored: an animation
+				-- is always the cover crop, and the stored choice comes back
+				-- when the picture is still again.
+				disabled = if animated() then "An animation always fills the screen." else nil,
+				control = { k = "choice", value = if animated() then "cover" else s.fit, options = {
 					{ value = "contain", label = "Fit to screen", detail = "The whole picture, letterboxed." },
 					{ value = "cover", label = "Fill the screen", detail = "Fills the window, cropping the overflow." },
 					{ value = "stretch", label = "Stretch to screen", detail = "Fills the window exactly, so the picture's shape changes." },
@@ -1054,6 +1147,10 @@ local function apply_change(state: State, item: string, value: any)
 		s.pixelated = value == true
 	elseif item == "smooth" then
 		s.smooth = value == true
+	elseif item == "animate" then
+		s.animate = value == true
+	elseif item == "frames" then
+		s.frames = clamp(math.floor(n or s.frames), 2, MAX_FRAMES)
 	elseif item == "mode" then
 		s.mode = one_of(tostring(value), MODES, s.mode)
 	elseif item == "algo" then
@@ -1216,17 +1313,29 @@ local function build(state: State): { main: Node, dock: Node }
 	-- above the page instead.
 	local children: { Node } = {}
 	if state.preview ~= nil then
+		-- The preview is the rendered file, and an animated render is every
+		-- frame in one image, so the row says so: the picture above is a grid
+		-- of cells, not the wallpaper's own layout.
+		local lines: { { any } } = {
+			{ ui.span("source", "muted"), ui.span(if s.source == "" then "none" else base(s.source)) },
+			{ ui.span("render", "muted"), ui.span(if kstr("render", "") == "" then "none" else base(kstr("render", ""))) },
+		}
+		if animated() then
+			table.insert(lines, {
+				ui.span("frames", "muted"),
+				ui.span(string.format("%d, one per cell of %d×%d",
+					knum("anim_frames", 0), knum("anim_cols", 1), knum("anim_rows", 1))),
+			})
+		end
+		table.insert(lines, { ui.span("note", "muted"), ui.span(kstr("note", "nothing rendered yet")) })
+
 		local row = ui.row({
 			ui.node("image", {
 				blob = state.preview,
-				alt = "Wallpaper preview",
+				alt = if animated() then "Wallpaper frames, one per cell" else "Wallpaper preview",
 				max = { h = "18lines", w = "36ch" },
 			}),
-			ui.kv({
-				{ ui.span("source", "muted"), ui.span(if s.source == "" then "none" else base(s.source)) },
-				{ ui.span("render", "muted"), ui.span(if kstr("render", "") == "" then "none" else base(kstr("render", ""))) },
-				{ ui.span("note", "muted"), ui.span(kstr("note", "nothing rendered yet")) },
-			}),
+			ui.kv(lines),
 		})
 		local p: { [string]: any } = row.p or {}
 		p.role = "wallpaper.preview"
@@ -1383,6 +1492,8 @@ local block: BlockDef<State> = {
 				s.contrast = DEFAULTS.contrast
 				s.invert = DEFAULTS.invert
 				s.maxside = DEFAULTS.maxside
+				s.animate = DEFAULTS.animate
+				s.frames = DEFAULTS.frames
 				write_settings(s)
 				bump()
 				state.seen_rev = knum("rev", 0)

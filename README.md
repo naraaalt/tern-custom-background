@@ -25,6 +25,9 @@ and shows a live preview of the dithered result.
   Knoll, Riemersma, threshold or nearest.
 - Fit (fit to screen, fill, stretch, tile), opacity, brightness, contrast,
   block size, pixel scale.
+- **An animated GIF moves.** The frames are rendered into one grid image and
+  the sheet turns it back into an animation with a keyframe per frame, at the
+  GIF's own delays; a still source is unaffected. Off with the Animate row.
 - **Palette: Image colours** reads the picture's own colours into the Custom
   colours row, so a colour wallpaper stays in colour.
 

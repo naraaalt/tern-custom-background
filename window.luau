@@ -101,6 +101,123 @@ local CLEAR_FILLS = [[
 }
 ]]
 
+-- --- the animation ----------------------------------------------------------
+
+-- The frames of the animation that is up, or nil for a still. The host half
+-- writes these from the engine's own report: how many frames it drew, the
+-- grid they were laid out in, one cell's size in rendered pixels, and how
+-- long each frame is held. None of it can be read off the picture, and the
+-- grid is the one thing a sheet cannot be told about any other way: the
+-- window is handed a single image of every frame, and the keyframes are what
+-- turn it back into an animation.
+--
+-- nil for anything inconsistent, so a half-written or hand-edited store
+-- leaves the still sheet up instead of a broken animation.
+local function animation(): { frames: number, cols: number, rows: number, cw: number, ch: number, delays: { number } }?
+	local frames = knum("anim_frames", 0)
+	local cols = knum("anim_cols", 0)
+	local rows = knum("anim_rows", 0)
+	local cw = knum("anim_cell_w", 0)
+	local ch = knum("anim_cell_h", 0)
+	if frames < 2 or cols < 1 or rows < 1 or cw < 1 or ch < 1 or cols * rows < frames then
+		return nil
+	end
+
+	local delays: { number } = {}
+	for part in string.gmatch(kstr("anim_delays", ""), "%d+") do
+		table.insert(delays, tonumber(part) :: number)
+	end
+	if #delays ~= frames then
+		return nil
+	end
+
+	return { frames = frames, cols = cols, rows = rows, cw = cw, ch = ch, delays = delays }
+end
+
+-- One cell of the grid, sized for the cover crop: a frame fills the window,
+-- so the cell is as wide as the window unless its own shape is wider than the
+-- window's, in which case the height is what fills it. This is `cover` with
+-- the picture being one cell rather than the whole grid, which is what keeps
+-- the animation's crop identical to the still's.
+local function cover_cell(a: number): (string, string)
+	return string.format("max(100vw, calc(%.6f * 100vh))", a),
+		string.format("max(calc(100vw / %.6f), 100vh)", a)
+end
+
+-- Where the image's top-left corner goes so that cell (col, row) is centred
+-- on the window: the offsets are lengths, and `background-position` places
+-- the image's corner at them. The still sheet gets the same result from
+-- `center`, which is why the two line up.
+local function cell_position(cw: string, ch: string, col: number, row: number): string
+	return string.format("calc(50vw - %.4f * %s) calc(50vh - %.4f * %s)",
+		col + 0.5, cw, row + 0.5, ch)
+end
+
+-- The sheet for an animated picture: the grid as one background image, and a
+-- keyframe per frame that moves it so the next cell sits where the last one
+-- was. `step-end` is what makes each frame hold for its own time rather than
+-- sliding into the next one - a GIF's frames are stills, not a tween.
+local function animated_sheet(
+	anim: { frames: number, cols: number, rows: number, cw: number, ch: number, delays: { number } },
+	picture: string,
+	scrim: string,
+	pixels: string
+): string
+	local total = 0
+	for _, d in anim.delays do
+		total += d
+	end
+	if total <= 0 then
+		total = anim.frames * 100
+	end
+
+	local cw, ch = cover_cell(anim.cw / anim.ch)
+
+	local frames: { string } = {}
+	local at = 0
+	local last = -1.0
+	for i = 1, anim.frames do
+		local pct = 0.0
+		if i > 1 then
+			-- The frames before this one are held first, so this one's
+			-- keyframe sits where they end. Offsets must rise, and a frame
+			-- held for a fraction of the total can round onto its
+			-- predecessor's, which would drop it: nudge instead.
+			at += anim.delays[i - 1]
+			pct = at / total * 100
+			if pct <= last then
+				pct = last + 0.001
+			end
+			last = pct
+		end
+		local col = (i - 1) % anim.cols
+		local row = math.floor((i - 1) / anim.cols)
+		table.insert(frames, string.format("\t%.3f%% { background-position: center, %s; }",
+			pct, cell_position(cw, ch, col, row)))
+	end
+
+	return string.format([[
+%s {
+	background-image: linear-gradient(rgb(0 0 0 / %s), rgb(0 0 0 / %s)), url("%s");
+	background-size: 100%% 100%%, calc(%d * %s) calc(%d * %s);
+	background-position: center, %s;
+	background-repeat: no-repeat, no-repeat;%s
+	animation: wallpaper-frames %dms step-end infinite;
+}
+@keyframes wallpaper-frames {
+%s
+}
+@media (prefers-reduced-motion: reduce) {
+	%s {
+		animation: none;
+	}
+}
+%s]], WINDOW, scrim, scrim, picture,
+		anim.cols, cw, anim.rows, ch,
+		cell_position(cw, ch, 0, 0), pixels, total,
+		table.concat(frames, "\n"), WINDOW, CLEAR_FILLS)
+end
+
 local function sheet(): string
 	local picture = kstr("picture", "")
 	if picture == "" or not kbool("enabled", true) then
@@ -113,6 +230,13 @@ local function sheet(): string
 	-- The knob is the wallpaper's opacity, so the scrim carries 1 - opacity:
 	-- at 100% the picture is untouched, at 0% it is a black sheet.
 	local scrim = string.format("%.3f", 1 - clamp(knum("opacity", DEFAULT_OPACITY), 0, 1))
+
+	local pixels = if kbool("pixelated", false) then "\n\timage-rendering: pixelated;" else ""
+
+	local anim = animation()
+	if anim ~= nil then
+		return animated_sheet(anim, picture, scrim, pixels)
+	end
 
 	-- The picture's size and repeat, by fit. The scrim is not part of the fit:
 	-- it always covers the whole surface, or a letterboxed picture would leave
@@ -128,8 +252,6 @@ local function sheet(): string
 	else
 		size, repeat_rule = "cover", "no-repeat"
 	end
-
-	local pixels = if kbool("pixelated", false) then "\n\timage-rendering: pixelated;" else ""
 
 	return string.format([[
 %s {
