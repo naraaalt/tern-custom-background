@@ -53,6 +53,12 @@ local function absolute(path: string): string
 	return if is_absolute(path) then path else abs(path)
 end
 
+-- The most frames the engine will draw. The ceiling is the grid, not the
+-- count: every frame is another cell in one image, and the cells shrink until
+-- the grid fits inside Tern's 4096 px limit, so more frames cost resolution.
+-- At 48 the grid is 7x7 and a cell is at most 585 px.
+local MAX_FRAMES = 48
+
 local DEFAULTS = {
 	mode = "diffusion",
 	algo = "fs",
@@ -71,7 +77,7 @@ local DEFAULTS = {
 	invert = false,
 	maxside = 1920,
 	animate = true,
-	frames = 12,
+	frames = MAX_FRAMES,
 	opacity = 0.30,
 	fit = "cover",
 	pixelated = false,
@@ -93,11 +99,6 @@ local KEYS = {
 local ANIM_KEYS = {
 	"anim_frames", "anim_cols", "anim_rows", "anim_cell_w", "anim_cell_h", "anim_delays",
 }
-
--- The most frames the engine will draw, and the most that is useful: past a
--- couple of dozen the grid shrinks every cell and the animation reads as a
--- flip book rather than a moving picture.
-local MAX_FRAMES = 48
 
 -- The engine's modes, in the order the menu lists them: the error diffusions
 -- first, then the ordered ones, then the two that do not dither at all.
@@ -1046,9 +1047,10 @@ local function rows_for(state: State): { { [string]: any } }
 			{
 				id = "frames",
 				label = "Frames",
-				hint = "How many the picture is sampled into. Each one shrinks the "
-					.. "cells until the grid fits in 4096 px; a source with fewer "
-					.. "frames uses what it has.",
+				hint = "The most frames to draw. The default is the cap, so a "
+					.. "source keeps its own pace; lowering it samples the "
+					.. "source evenly and holds each drawn frame for the time "
+					.. "of the ones it stands in for.",
 				disabled = if s.animate then nil else "Used once Animate is on.",
 				control = { k = "number", value = s.frames, min = 2, max = MAX_FRAMES },
 			},

@@ -55,12 +55,16 @@ plugin reload` does it straight away (see the engine's stamp below).
   which normally inserts the path.
 - **Animate** (on by default) moves an animated source: an animated GIF's
   frames are dithered one by one into a grid image and the sheet steps through
-  them at the GIF's own delays. **Frames** (2–48, 12 by default) says how many
-  are drawn; a source with fewer uses what it has, and each extra frame shrinks
-  the cells so the grid still fits inside Tern's 4096 px limit. A still image
-  renders the same either way. While an animation is up the Fit row reads
-  `cover` and is disabled, because the frames only line up as one grid; the
-  stored choice comes back when the picture is still again.
+  them at the GIF's own delays. **Frames** (2–48, 48 by default) caps how many
+  are drawn, and the default is the cap, so a source with 48 frames or fewer
+  keeps every frame it has and the pace the file set. Lowering it samples the
+  source evenly and holds each drawn frame for the time of the ones it stands
+  in for, which is how a long GIF is made cheap. Each frame is another cell,
+  and the cells shrink until the grid fits inside Tern's 4096 px limit, so
+  more frames cost resolution. A still image renders the same either way.
+  While an animation is up the Fit row reads `cover` and is disabled, because
+  the frames only line up as one grid; the stored choice comes back when the
+  picture is still again.
 
 ## Settings
 
@@ -78,7 +82,7 @@ plugin reload` does it straight away (see the engine's stamp below).
 | Pixel scale | 1–16, divides the source before the dither | 1 |
 | Longest side | 1280/1920/2560/3840/4096 | 1920 |
 | Animate | on/off, moves an animated source | on |
-| Frames | 2–48, how many frames the picture is sampled into | 12 |
+| Frames | 2–48, the most frames to draw | 48, the cap: a source with fewer keeps every frame it has |
 | Threshold | 0–100% | 50% |
 | Brightness | −100–100% | 0% |
 | Contrast | 10–300% | 100% |
@@ -133,8 +137,8 @@ one sheet on the window is the way to get one crop.
 
 ### An animation is one image
 
-A GIF's frames are dithered separately and laid out in one grid — 12 frames as
-4×3 — because a sheet can only be handed one image. The window half then walks
+A GIF's frames are dithered separately and laid out in one grid — 31 frames as
+6×6 — because a sheet can only be handed one image. The window half then walks
 that grid with a `@keyframes` rule: one keyframe per frame, each moving
 `background-position` by exactly one cell, with `animation-timing-function:
 step-end` so each frame holds for its own time instead of sliding into the
@@ -148,22 +152,53 @@ it so cell *k* sits where a single frame would have been; that is the same
 `cover` crop the still sheet gets from `center`, which is why a still and an
 animation of the same source line up.
 
-Verified two ways. Deterministically: with the timeline frozen (`tern ctl
-motion-at`), a 4-frame render of a file whose frames are 1000/500/1000/500 ms
-of flat black, white, black, white reads black, white, black, white at 100,
-1200, 1800 and 2700 ms — the frames appear in the file's order and are held
-for the file's own times. And against the atlas: seeking a 12-frame render to
-each frame's midpoint and comparing the window with the cell it should be
-showing agrees on 96.8% of the samples that are pure black or white on both
-sides, with the residual spread evenly over one-pixel shifts (96.8% at 0 and
-±1, 95.5% at ±2, ±3). So the crop is centred to within a pixel of sampling
-tolerance, not off by a cell.
+Verified two ways, both with the timeline frozen (`tern ctl motion-at`, whose
+own accuracy was checked first against a sheet with known keyframes).
+Deterministically: a 4-frame render of a file whose frames are
+1000/500/1000/500 ms of flat black, white, black, white reads black, white,
+black, white at 100, 1200, 1800 and 2700 ms — the frames appear in the file's
+order and are held for the file's own times. And against the atlas: seeking a
+31-frame render to each frame's midpoint and asking which cell the window is
+showing identifies 29 of the 31 frames — 3 to 30 exactly, and frame 0 — and
+cannot separate frames 0, 1 and 2, which are 30 ms apart and nearly identical
+in the source, so naming all three frame 0 is the closest the comparison can
+get rather than evidence they were skipped. The comparison subtracts a
+reference shot, so Tern's own interface — identical in both shots — cancels;
+matching raw brightness instead does not work, because the interface over the
+wallpaper contributes more to a pixel than the wallpaper does. Getting the cell
+right also means the crop model is right: a crop off by one cell would name the
+neighbouring frame.
 
 The engine shrinks the cell until the grid fits: `ceil(sqrt(N))` columns and
 `ceil(N / cols)` rows, scaled down by the same factor on both axes when either
 side would pass 4096 px. The scaled size is **floored**, not rounded — six
 columns of a cell rounded from 682.67 to 683 are 4098 px wide, and Tern
 refuses the image — and clamped to `4096 / cols` as a second guarantee.
+
+### What decides whether it reads as smooth
+
+Two things, and neither is Tern: the frames drawn, and the dither.
+
+**Frames.** The animation can only be as smooth as the file. A 31-frame GIF
+asked for 12 frames is 11.7 fps and reads as a flip book, and the frames that
+survive are the ones a sampling pattern picked, not the ones the file meant to
+show. The default asks for the cap, so any source of 48 frames or fewer is
+drawn whole and runs at its own rate — 30 fps for the GIF this was built
+against. Tern has room for that pace: over a three-second sample it drew about
+180 frames a second, with the paint at 0.32 ms at the median and 0.41 ms at
+the 95th percentile against the 30 ms a slot lasts. Headroom, not a guarantee —
+three seconds says nothing about the worst case, and this was measured with
+the wallpaper as the only thing moving.
+
+**Dither.** Ordered dithering ties its pattern to the pixel grid, so a pixel
+changes only where the content under it changed. Error diffusion recomputes
+its noise from its neighbours every frame, so pixels flip even where the source
+barely moved, and the noise crawls over a moving picture. Measured on the same
+31 frames as the share of pixels that flip between adjacent frames: Bayer 16×16
+1.09%, blue noise 2.48%, Sierra 3-row 4.34%. A moving wallpaper reads cleanest
+with an ordered mode — Bayer or Knoll — and it is the biggest visual difference
+after the frame count. The measure is only meaningful while the content moves:
+a still dithered picture does not change from frame to frame at all.
 
 `animate` off, or a source with one frame, renders one cell and clears the six
 `anim_*` keys, so the window half is back on the still path with nothing to
@@ -412,8 +447,10 @@ and the preview is the render itself rather than a second one.
   frame would make the colours crawl as the picture moves.
 - **Frames are sampled evenly, and their delays are added up.** Asking for
   fewer frames than the file has keeps the animation's length and pace: the
-  skipped frames' delays go to the frame that stands in for them. 12 frames of
-  a 31-frame GIF is what the default does.
+  skipped frames' delays go to the frame that stands in for them. The default
+  asks for the cap, so a GIF of 48 frames or fewer is drawn whole; a GIF
+  longer than that loses frames and gets choppier, which is the one thing
+  raising the cap would fix at the cost of resolution.
 - **One render at a time.** While a render runs the loop ignores new changes;
   the debounce picks up the newest settings when it fires.
 - **The pane width decides the layout.** The `prefs` kind collapses its nav to

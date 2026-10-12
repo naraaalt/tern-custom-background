@@ -28,6 +28,10 @@ and shows a live preview of the dithered result.
 - **An animated GIF moves.** The frames are rendered into one grid image and
   the sheet turns it back into an animation with a keyframe per frame, at the
   GIF's own delays; a still source is unaffected. Off with the Animate row.
+  The default draws up to 48 frames — the cap — so a GIF of 48 frames or fewer
+  keeps every frame it has and runs at the file's own rate. For the smoothest
+  motion pick an ordered mode — Bayer or Knoll: error diffusion recomputes its
+  noise each frame, so the dither crawls over the moving picture.
 - **Palette: Image colours** reads the picture's own colours into the Custom
   colours row, so a colour wallpaper stays in colour.
 
