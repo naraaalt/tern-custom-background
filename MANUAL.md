@@ -71,9 +71,12 @@ plugin reload` does it straight away (see the engine's stamp below).
 | Setting | Values | Default |
 | --- | --- | --- |
 | Image file | any path | none; the row starts empty and the wallpaper waits for one |
-| Method | Error diffusion, Bayer matrix, Blue noise, Knoll, Riemersma, Threshold, Nearest | Error diffusion |
+| Method | Error diffusion, Bayer matrix, Blue noise, Knoll, Riemersma, Threshold, Nearest, Characters | Error diffusion |
 | Kernel | Floyd–Steinberg, Atkinson, Jarvis–Judice–Ninke, Stucki, Burkes, Sierra, Sierra two-row, Sierra lite, Fan, Shiau–Fan, Shiau–Fan 2, Simple 2D, Dizzy | Floyd–Steinberg |
 | Matrix | 2×2, 4×4, 8×8, 16×16 (Bayer), or 2×2 … 16×16, blue noise (Knoll) | 8×8 |
+| Character size | 1–8, the cell in 8×8 font squares (Characters) | 3 |
+| Ramp | Dots, Minimal, Classic, Long, Custom characters (Characters) | Classic |
+| Characters | 1–95 printable ASCII characters, lightest to densest (Characters, Custom ramp) | ` .:-=+*#%@` |
 | Block size | 1–25 px, blocks up the dithered result | 1 |
 | Smooth blocks | on/off, average each block instead of sampling its middle | off |
 | Palette | black and white, 4/8/16 greys, the image's own colours, custom `#rrggbb` list, or a retro preset: Game Boy, CGA / EGA, PICO-8, Commodore 64 | black and white |
@@ -92,9 +95,10 @@ plugin reload` does it straight away (see the engine's stamp below).
 | Hard pixel edges | on/off (`image-rendering: pixelated`) | off |
 
 The Kernel, Matrix and Block size rows are disabled while the method that does
-not read them is running. A stored `bayer4`, `bayer8`, `threshold` or `none`
-from the version that had them in `Algorithm` is moved onto `Method` once, when
-the plugin first loads.
+not read them is running, and so are Character size, Ramp and Characters while
+any other method is. A stored `bayer4`, `bayer8`, `threshold` or `none` from the
+version that had them in `Algorithm` is moved onto `Method` once, when the
+plugin first loads.
 
 ## How it fits together
 
@@ -334,10 +338,11 @@ unique.
 
 ```
 dither.exe --in <path> --out <path>
-           [--mode diffusion|bayer|bluenoise|knoll|riemersma|threshold|none]
+           [--mode diffusion|bayer|bluenoise|knoll|riemersma|threshold|none|ascii]
            [--algo fs|atkinson|jjn|stucki|burkes|sierra3|sierra2|sierra24a|
                    fan|shiaufan|shiaufan2|simple2d|dizzy]
            [--matrix 2|4|8|16] [--pattern 2|4|8|16|bluenoise]
+           [--glyph 1..8] [--chars " .:-=+*#%@"]
            [--pixelate 1..25] [--smooth]
            [--palette bw|gray4|gray8|gray16|auto|custom:#rrggbb,...]
            [--extract N] [--extract-method popularity|median]
@@ -366,7 +371,8 @@ entries — for every colour it walks the palette the way an error diffusion
 would and counts how often each entry wins, so a picture with six colours
 comes out mixed rather than banded. `riemersma` diffuses along a Hilbert
 curve, which keeps the error near where it belongs and leaves no directional
-streaks. `threshold` and `none` do not dither at all.
+streaks. `threshold` and `none` do not dither at all. `ascii` does not draw
+pixels at all: it draws characters.
 
 **The ordered dither's amplitude is the palette's own step**, not the whole
 range: the bias spans the gap between the two entries a pixel sits between, so
@@ -431,12 +437,50 @@ and `--mode threshold`, and does not move any other palette.
 the source, so the dots grow while the picture keeps the detail the dither was
 computed at; `--scale` is the other way round and takes the detail away first.
 `--smooth` averages each block instead of taking its middle pixel, which reads
-softer and less speckled.
+softer and less speckled. `ascii` is left out of the pass: a character is
+already a block of the glyph's own making, and blocking that up again would
+break the characters apart rather than make them coarser. `--glyph` is the one
+knob for how big a character is.
 
-Measured on a 736×736 JPEG, one core: 40–101 ms for every mode, and the
-blue-noise mask is built once and cached for the life of the process. The
-process spawn is the other half of the cost, which is why the block debounces
-and the preview is the render itself rather than a second one.
+**The characters.** `--mode ascii` draws the picture as text. Each cell of the
+output is one glyph, and which glyph is decided by how much ink it puts down
+against the cell's own tone: the cell is averaged, that average picks a place
+on the ramp, and the character there is drawn. `--glyph` sets the cell as a
+multiple of the font's 8×8 square, so `1` is 8 px cells and `3` is 24 px ones.
+The cell is cut back to the largest whole number of characters that fits inside
+what the rest of the engine already fitted, so the grid is always whole
+characters and the strip the grid does not reach is paper.
+
+The font is the 8×8 bitmap set that Marcel Sondaar put in the public domain as
+a port of the IBM VGA fonts (via Daniel Hepper's transcription), embedded in
+the binary as 95 glyphs of eight bytes. It is embedded rather than drawn from
+an installed face because a wallpaper that came out different on another
+machine would not be the same wallpaper, and at this size a hinted system face
+is not the crisp bitmap this wants anyway.
+
+**A ramp is sorted, not typed.** The ramp is the characters, and the engine
+sorts them by the ink their glyphs put down before it draws anything. That is
+not a nicety: the classic ramp typed the way everyone types it is not monotonic
+in this font — `-` is lighter than `:`, and `%` lighter than `*` — so a ramp
+used in the order it was written would run backwards over part of its range.
+Sorting also means the order a ramp is written in is not a setting, and the
+sort is stable so two characters of equal ink keep the order they were given
+in.
+
+**ASCII draws in two colours, whatever palette is in hand**: the glyphs in the
+lightest entry and the paper in the darkest, chosen by luminance rather than by
+position so a custom list typed light-first still comes out with the glyphs on
+the dark one. A sixteen-colour preset therefore reads as its own darkest and
+lightest — PICO-8's black and its white, the Game Boy's darkest green and its
+lightest — which is what makes the mode worth pairing with the retro palettes.
+
+Measured on a 736×736 JPEG, one core: 41–124 ms for every mode, and the
+blue-noise mask is built once and cached for the life of the process. `ascii`
+is at the fast end of that and barely moves with the character size — 42 ms at
+one and 48 ms at eight — because the glyph blit is a small part of a run whose
+cost is the decode. The process spawn is the other half of the cost, which is
+why the block debounces and the preview is the render itself rather than a
+second one.
 
 ## Notes and limits
 

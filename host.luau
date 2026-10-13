@@ -64,6 +64,9 @@ local DEFAULTS = {
 	algo = "fs",
 	matrix = "8",
 	pattern = "8",
+	glyph = 3,
+	ramp = "classic",
+	chars = " .:-=+*#%@",
 	pixelate = 1,
 	smooth = false,
 	palette = "bw",
@@ -86,7 +89,8 @@ local DEFAULTS = {
 }
 
 local KEYS = {
-	"source", "mode", "algo", "matrix", "pattern", "pixelate", "smooth",
+	"source", "mode", "algo", "matrix", "pattern", "glyph", "ramp", "chars",
+	"pixelate", "smooth",
 	"palette", "colors", "extract", "extract_method", "scale", "cut",
 	"brightness", "contrast", "invert", "maxside", "animate", "frames",
 	"opacity", "fit", "pixelated", "enabled", "claim",
@@ -101,8 +105,9 @@ local ANIM_KEYS = {
 }
 
 -- The engine's modes, in the order the menu lists them: the error diffusions
--- first, then the ordered ones, then the two that do not dither at all.
-local MODES = { "diffusion", "bayer", "bluenoise", "knoll", "riemersma", "threshold", "none" }
+-- first, then the ordered ones, then the two that do not dither at all, and
+-- then the one that does not draw pixels.
+local MODES = { "diffusion", "bayer", "bluenoise", "knoll", "riemersma", "threshold", "none", "ascii" }
 local ALGOS = {
 	"fs", "atkinson", "jjn", "stucki", "burkes", "sierra3", "sierra2", "sierra24a",
 	"fan", "shiaufan", "shiaufan2", "simple2d", "dizzy",
@@ -178,6 +183,63 @@ end
 
 local METHODS = { "popularity", "median" }
 local FITS = { "cover", "contain", "stretch", "tile" }
+
+-- The character ramps the Characters method draws with, in the order the menu
+-- lists them, lightest to densest. They travel to the engine as an ordinary
+-- `--chars` string, so the engine has no notion of a ramp by name and nothing
+-- in it has to learn about them.
+--
+-- The order here is only how they read in the row: the engine sorts a ramp by
+-- the ink its glyphs put down before it draws with it, because the ramp
+-- everyone types is not monotonic in this font - "-" is lighter than ":", and
+-- "%" lighter than "*".
+local RAMPS = {
+	dots = {
+		label = "Dots",
+		detail = "Two tones: the coarsest there is.",
+		chars = " .",
+	},
+	minimal = {
+		label = "Minimal",
+		detail = "Five characters, poster-like.",
+		chars = " .:*#",
+	},
+	classic = {
+		label = "Classic",
+		detail = "The ten everyone types.",
+		chars = " .:-=+*#%@",
+	},
+	long = {
+		label = "Long",
+		detail = "Seventy characters, for the most detail.",
+		chars = [==[ .'`^",:;Il!i><~+_-?][}{1)(|\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@$]==],
+	},
+}
+local RAMP_NAMES = { "dots", "minimal", "classic", "long" }
+
+local RAMPS_LIST = { "custom" }
+for _, name in RAMP_NAMES do
+	table.insert(RAMPS_LIST, name)
+end
+
+-- The menu, built once, kept beside RAMPS so a ramp cannot be added without
+-- appearing in the row.
+local RAMP_OPTIONS = {
+	{ value = "classic", label = RAMPS.classic.label, detail = RAMPS.classic.detail },
+	{ value = "dots", label = RAMPS.dots.label, detail = RAMPS.dots.detail },
+	{ value = "minimal", label = RAMPS.minimal.label, detail = RAMPS.minimal.detail },
+	{ value = "long", label = RAMPS.long.label, detail = RAMPS.long.detail },
+	{ value = "custom", label = "Custom characters" },
+}
+
+-- The characters a named ramp stands for, or nil for the ones that are not
+-- named. The Characters row shows these rather than the user's own list while
+-- a named ramp is in use, so the row says which characters are in effect
+-- without the ramp overwriting a list the user typed.
+local function ramp_chars(name: string): string?
+	local r = RAMPS[name]
+	return if r ~= nil then r.chars else nil
+end
 
 local IMAGE_EXT = {
 	png = true, jpg = true, jpeg = true, gif = true, bmp = true, tif = true, tiff = true,
@@ -286,6 +348,9 @@ local function settings(): { [string]: any }
 	s.algo = one_of(kstr("algo", DEFAULTS.algo), ALGOS, DEFAULTS.algo)
 	s.matrix = one_of(kstr("matrix", DEFAULTS.matrix), MATRICES, DEFAULTS.matrix)
 	s.pattern = one_of(kstr("pattern", DEFAULTS.pattern), PATTERNS, DEFAULTS.pattern)
+	s.glyph = clamp(math.floor(knum("glyph", DEFAULTS.glyph)), 1, 8)
+	s.ramp = one_of(kstr("ramp", DEFAULTS.ramp), RAMPS_LIST, DEFAULTS.ramp)
+	s.chars = kstr("chars", DEFAULTS.chars)
 	s.pixelate = clamp(math.floor(knum("pixelate", DEFAULTS.pixelate)), 1, 25)
 	s.smooth = kbool("smooth", DEFAULTS.smooth)
 	s.palette = one_of(kstr("palette", DEFAULTS.palette), PALETTES, DEFAULTS.palette)
@@ -388,8 +453,18 @@ local function signature(s: { [string]: any }): string
 		table.insert(parts, tostring(s.matrix))
 	elseif s.mode == "knoll" then
 		table.insert(parts, tostring(s.pattern))
+	elseif s.mode == "ascii" then
+		table.insert(parts, tostring(s.glyph))
+		-- The characters in effect, not the ramp's name: two ramps can hold
+		-- the same characters, and a name that changed without the characters
+		-- changing is not a render.
+		table.insert(parts, ramp_chars(s.ramp) or tostring(s.chars))
 	end
-	if s.pixelate > 1 then
+	-- The block size is not a render under ASCII: the engine leaves the pass
+	-- out there, because a character is already a block of the glyph's own
+	-- making. A setting the engine ignores must not move the signature, or
+	-- editing it would re-render the same picture.
+	if s.pixelate > 1 and s.mode ~= "ascii" then
 		table.insert(parts, tostring(s.pixelate))
 		table.insert(parts, tostring(s.smooth))
 	end
@@ -433,8 +508,13 @@ local function render_argv(s: { [string]: any }, out: string): { string }
 	elseif s.mode == "knoll" then
 		table.insert(argv, "--pattern")
 		table.insert(argv, s.pattern)
+	elseif s.mode == "ascii" then
+		table.insert(argv, "--glyph")
+		table.insert(argv, tostring(s.glyph))
+		table.insert(argv, "--chars")
+		table.insert(argv, ramp_chars(s.ramp) or s.chars)
 	end
-	if s.pixelate > 1 then
+	if s.pixelate > 1 and s.mode ~= "ascii" then
 		table.insert(argv, "--pixelate")
 		table.insert(argv, tostring(s.pixelate))
 		if s.smooth then
@@ -738,11 +818,11 @@ local function ui_state(state: State): UiState
 	return u
 end
 
-local TEXT_ROWS = { source = true, colors = true }
+local TEXT_ROWS = { source = true, colors = true, chars = true }
 -- A choice row with more than four options draws as a popup button, which only
 -- opens its menu while the row is the one being edited.
 local CHOICE_ROWS = {
-	mode = true, algo = true, matrix = true, pattern = true,
+	mode = true, algo = true, matrix = true, pattern = true, ramp = true,
 	palette = true, maxside = true, fit = true,
 }
 
@@ -756,6 +836,12 @@ local function row_value(state: State, row: string): string
 		return tostring(s.matrix)
 	elseif row == "pattern" then
 		return tostring(s.pattern)
+	elseif row == "glyph" then
+		return tostring(s.glyph)
+	elseif row == "ramp" then
+		return tostring(s.ramp)
+	elseif row == "chars" then
+		return ramp_chars(s.ramp) or tostring(s.chars)
 	elseif row == "palette" then
 		return tostring(s.palette)
 	elseif row == "maxside" then
@@ -987,6 +1073,8 @@ local function rows_for(state: State): { { [string]: any } }
 						detail = "No dither: a hard two-tone cut." },
 					{ value = "none", label = "Nearest",
 						detail = "No dither: snap to the nearest level." },
+					{ value = "ascii", label = "Characters",
+						detail = "Draws the picture as text: one glyph to a cell." },
 				} },
 			},
 			{
@@ -1036,16 +1124,49 @@ local function rows_for(state: State): { { [string]: any } }
 				} },
 			},
 			{
+				id = "glyph",
+				label = "Character size",
+				hint = "One character per cell, in the font's 8×8 square at this "
+					.. "scale. Larger is fewer, coarser characters.",
+				disabled = if s.mode == "ascii" then nil else "Used by Characters.",
+				control = { k = "number", value = s.glyph, min = 1, max = 8, unit = "×" },
+			},
+			{
+				id = "ramp",
+				label = "Ramp",
+				hint = "Which characters stand for the tones. The engine sorts "
+					.. "them by the ink their glyphs put down, so the order they "
+					.. "are written in is not a setting.",
+				disabled = if s.mode == "ascii" then nil else "Used by Characters.",
+				control = { k = "choice", value = s.ramp, options = RAMP_OPTIONS },
+			},
+			{
+				id = "chars",
+				label = "Characters",
+				hint = "Printable ASCII, lightest to densest. Used by the Custom "
+					.. "characters ramp; a named ramp above supplies its own set, "
+					.. "shown here.",
+				-- A named ramp shows the characters it stands for, and the
+				-- user's own list is left alone underneath, so switching back
+				-- to Custom characters brings it back.
+				disabled = if s.mode ~= "ascii" then "Used by Characters."
+					elseif ramp_chars(s.ramp) ~= nil then "Set by the ramp."
+					else nil,
+				control = { k = "text", value = ramp_chars(s.ramp) or s.chars, mono = true },
+			},
+			{
 				id = "pixelate",
 				label = "Block size",
 				hint = "Blocks the dithered result, so the dots grow and the picture keeps its detail.",
+				disabled = if s.mode == "ascii" then "Not used by Characters." else nil,
 				control = { k = "number", value = s.pixelate, min = 1, max = 25, unit = "px" },
 			},
 			{
 				id = "smooth",
 				label = "Smooth blocks",
 				hint = "Averages each block instead of taking its middle pixel.",
-				disabled = if s.pixelate > 1 then nil else "Used once the block size is above 1.",
+				disabled = if s.mode == "ascii" then "Not used by Characters."
+					elseif s.pixelate > 1 then nil else "Used once the block size is above 1.",
 				control = { k = "switch", on = s.smooth },
 			},
 			{
@@ -1227,6 +1348,10 @@ local function apply_change(state: State, item: string, value: any)
 		s.matrix = one_of(tostring(value), MATRICES, s.matrix)
 	elseif item == "pattern" then
 		s.pattern = one_of(tostring(value), PATTERNS, s.pattern)
+	elseif item == "glyph" then
+		s.glyph = clamp(math.floor(n or s.glyph), 1, 8)
+	elseif item == "ramp" then
+		s.ramp = one_of(tostring(value), RAMPS_LIST, s.ramp)
 	elseif item == "pixelate" then
 		s.pixelate = clamp(math.floor(n or s.pixelate), 1, 25)
 	elseif item == "palette" then
@@ -1277,6 +1402,26 @@ local function commit_text(state: State, row: string, text: string): boolean
 		state.s.source = text
 	elseif row == "colors" then
 		state.s.colors = text
+		state.preview_error = nil
+	elseif row == "chars" then
+		-- The engine takes 1 to 95 characters of printable ASCII and says so
+		-- itself; a field that does not is refused here rather than sent to
+		-- fail, so clearing the row or pasting the wrong thing into it is not
+		-- a failed render. Refused, not silently trimmed: the row keeps what
+		-- it had and the user sees their text did not take.
+		if #text == 0 then
+			state.preview_error = "a ramp needs at least one character"
+			return false
+		end
+		if #text > 95 then
+			state.preview_error = "a ramp takes at most 95 characters"
+			return false
+		end
+		if text:match("^[\32-\126]+$") == nil then
+			state.preview_error = "a ramp takes printable ASCII only"
+			return false
+		end
+		state.s.chars = text
 		state.preview_error = nil
 	end
 	write_settings(state.s)
@@ -1548,6 +1693,9 @@ local block: BlockDef<State> = {
 				s.algo = DEFAULTS.algo
 				s.matrix = DEFAULTS.matrix
 				s.pattern = DEFAULTS.pattern
+				s.glyph = DEFAULTS.glyph
+				s.ramp = DEFAULTS.ramp
+				s.chars = DEFAULTS.chars
 				s.pixelate = DEFAULTS.pixelate
 				s.smooth = DEFAULTS.smooth
 				s.palette = DEFAULTS.palette

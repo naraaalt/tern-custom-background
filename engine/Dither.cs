@@ -6,11 +6,12 @@
 // ffmpeg, nothing to install.
 //
 //   dither.exe --in <path> --out <path>
-//              [--mode diffusion|bayer|knoll|bluenoise|riemersma|threshold|none]
+//              [--mode diffusion|bayer|knoll|bluenoise|riemersma|threshold|none|ascii]
 //              [--algo fs|atkinson|jjn|stucki|burkes|sierra3|sierra2|sierra24a|
 //                      fan|shiaufan|shiaufan2|simple2d|dizzy]
 //              [--matrix 2|4|8|16] [--pattern 2|4|8|16|bluenoise]
 //              [--pixelate 1..25] [--smooth]
+//              [--glyph 1..8] [--chars " .:-=+*#%@"]
 //              [--palette bw|gray4|gray8|gray16|auto|custom:#rrggbb,#rrggbb,...]
 //              [--extract N] [--extract-method popularity|median]
 //              [--scale 1..16] [--max N]
@@ -51,6 +52,14 @@ internal static class Dither
 	private static bool invert = false;
 	private static int extract = 8;
 	private static string extractMethod = "popularity";
+
+	// The ascii mode's cell, as a multiple of the font's 8x8 square, and the
+	// characters it draws with. The characters are passed in rather than
+	// named: what makes a good ramp is a matter of taste, the block that
+	// drives this has its own list of them, and a name here would be this
+	// tool knowing a menu item.
+	private static int glyph = 3;
+	private static string chars = " .:-=+*#%@";
 
 	// How many frames of an animated source to draw, 1 for a still. An image
 	// with fewer frames uses what it has.
@@ -113,20 +122,39 @@ internal static class Dither
 					cell = FitAtlas(cell, cols, rows);
 				}
 
+				// Characters come out whole or not at all, so the cell is cut
+				// back to the largest number of them that fits inside it.
+				if (mode == "ascii")
+				{
+					cell = FitAscii(cell);
+				}
+
 				// The palette comes off the first frame and is used for every
 				// one: a palette per frame would make the colours crawl.
 				List<Color> palette = paletteName == "auto"
 					? PaletteFromImage(CompositeFrame(img, picked[0]), sw0, sh0)
 					: BuildPalette();
+				// ASCII is a two-tone render whatever palette is in hand: the
+				// glyphs are one colour and the paper another, so the palette
+				// is read as its two ends.
+				if (mode == "ascii")
+				{
+					palette = AsciiPair(palette);
+				}
 
 				// The pixelate pass runs over the dithered result, so it blocks
 				// up the dither pattern rather than the picture, and the size it
 				// gives back is the size that gets written. It is computed here
 				// because every cell has to come out the same size for the grid
 				// to line up.
+				//
+				// ASCII is left out of it: its cell is already a block of the
+				// glyph's own making, and blocking that up again would break the
+				// characters apart rather than make them coarser. The glyph size
+				// is the one knob for how big a character is.
 				int w = cell.Width;
 				int h = cell.Height;
-				if (pixelate > 1)
+				if (pixelate > 1 && mode != "ascii")
 				{
 					w = Math.Max(1, (w + pixelate - 1) / pixelate);
 					h = Math.Max(1, (h + pixelate - 1) / pixelate);
@@ -200,7 +228,11 @@ internal static class Dither
 	// animation runs it once per frame, into one cell of the grid.
 	private static void DitherCell(double[] px, int w, int h, List<Color> palette, int[] index)
 	{
-		if (mode == "bayer")
+		if (mode == "ascii")
+		{
+			Ascii(px, w, h, palette, index);
+		}
+		else if (mode == "bayer")
 		{
 			Ordered(px, w, h, palette, index, Bayer(matrix), matrix);
 		}
@@ -242,7 +274,7 @@ internal static class Dither
 	{
 		Console.Error.WriteLine("usage: dither --in PATH --out PATH [options]");
 		Console.Error.WriteLine("  --mode      diffusion | bayer | knoll | bluenoise | riemersma");
-		Console.Error.WriteLine("              | threshold | none                                  (diffusion)");
+		Console.Error.WriteLine("              | threshold | none | ascii                        (diffusion)");
 		Console.Error.WriteLine("  --algo      diffusion only: fs | atkinson | jjn | stucki | burkes");
 		Console.Error.WriteLine("              | sierra3 | sierra2 | sierra24a | fan | shiaufan");
 		Console.Error.WriteLine("              | shiaufan2 | simple2d | dizzy                      (fs)");
@@ -256,6 +288,9 @@ internal static class Dither
 		Console.Error.WriteLine("  --extract-method  popularity | median                            (popularity)");
 		Console.Error.WriteLine("  --frames    frames of an animated source to draw, 1..48          (1)");
 		Console.Error.WriteLine("              an atlas of ceil(sqrt(N)) columns is written instead");
+		Console.Error.WriteLine("  --glyph     ascii only: character size, 1..8, in 8x8 font cells  (3)");
+		Console.Error.WriteLine("  --chars     ascii only: the characters to draw with, lightest to");
+		Console.Error.WriteLine("              densest, up to 95 of printable ASCII     ( .:-=+*#%@)");
 		Console.Error.WriteLine("  --scale     integer downscale divisor, 1..16                     (1)");
 		Console.Error.WriteLine("  --max       cap the longest output side at N pixels              (none)");
 		Console.Error.WriteLine("  --threshold 0..1, the cut used by the bw palette                 (0.5)");
@@ -320,6 +355,12 @@ internal static class Dither
 				case "--extract-method":
 					if (v == null) return false;
 					extractMethod = v.ToLowerInvariant(); i++; break;
+				case "--glyph":
+					if (v == null) return false;
+					glyph = int.Parse(v, CultureInfo.InvariantCulture); i++; break;
+				case "--chars":
+					if (v == null) return false;
+					chars = v; i++; break;
 				case "--frames":
 					if (v == null) return false;
 					frames = int.Parse(v, CultureInfo.InvariantCulture); i++; break;
@@ -358,11 +399,35 @@ internal static class Dither
 		}
 
 		if (mode != "diffusion" && mode != "bayer" && mode != "knoll" && mode != "bluenoise"
-			&& mode != "riemersma" && mode != "threshold" && mode != "none")
+			&& mode != "riemersma" && mode != "threshold" && mode != "none" && mode != "ascii")
 		{
 			Console.Error.WriteLine("dither: unknown --mode " + mode);
 			return false;
 		}
+
+		// Checked whatever the mode, like the kernel: characters that cannot
+		// be drawn are wrong whether or not this run draws them.
+		if (glyph < 1) glyph = 1;
+		if (glyph > 8) glyph = 8;
+		if (chars.Length == 0)
+		{
+			Console.Error.WriteLine("dither: --chars needs at least one character");
+			return false;
+		}
+		if (chars.Length > 95)
+		{
+			Console.Error.WriteLine("dither: --chars takes at most 95 characters");
+			return false;
+		}
+		foreach (char c in chars)
+		{
+			if (c < 0x20 || c > 0x7E)
+			{
+				Console.Error.WriteLine("dither: --chars takes printable ASCII, not " + ((int)c));
+				return false;
+			}
+		}
+		ramp = Ramp(chars);
 
 		// Checked whatever the mode: the name is wrong either way, and only
 		// the diffusion mode reads it.
@@ -1953,6 +2018,293 @@ internal static class Dither
 			y += s * ry;
 			t /= 4;
 		}
+	}
+
+	// ================================================================= ascii
+
+	// The 8x8 bitmap font the characters are drawn from, one glyph to a line:
+	// eight rows of eight pixels, the top row first, bit 7 the leftmost. It
+	// covers 0x20..0x7E, so every character a ramp can name is one the font
+	// has.
+	//
+	// Public domain: the 8x8 monochrome bitmap fonts for rendering by Daniel
+	// Hepper, which are Marcel Sondaar's public-domain port of the IBM VGA
+	// fonts. Embedded rather than drawn from an installed face: a wallpaper
+	// that came out different on another machine would not be the same
+	// wallpaper, and at this size a hinted system face is not the crisp
+	// bitmap this wants anyway.
+	private static readonly byte[] FONT8X8 = {
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // space
+		0x18, 0x3C, 0x3C, 0x18, 0x18, 0x00, 0x18, 0x00, // !
+		0x36, 0x36, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // "
+		0x36, 0x36, 0x7F, 0x36, 0x7F, 0x36, 0x36, 0x00, // #
+		0x0C, 0x3E, 0x03, 0x1E, 0x30, 0x1F, 0x0C, 0x00, // $
+		0x00, 0x63, 0x33, 0x18, 0x0C, 0x66, 0x63, 0x00, // %
+		0x1C, 0x36, 0x1C, 0x6E, 0x3B, 0x33, 0x6E, 0x00, // &
+		0x06, 0x06, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, // apostrophe
+		0x18, 0x0C, 0x06, 0x06, 0x06, 0x0C, 0x18, 0x00, // (
+		0x06, 0x0C, 0x18, 0x18, 0x18, 0x0C, 0x06, 0x00, // )
+		0x00, 0x66, 0x3C, 0xFF, 0x3C, 0x66, 0x00, 0x00, // *
+		0x00, 0x0C, 0x0C, 0x3F, 0x0C, 0x0C, 0x00, 0x00, // +
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x0C, 0x0C, 0x06, // ,
+		0x00, 0x00, 0x00, 0x3F, 0x00, 0x00, 0x00, 0x00, // -
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x0C, 0x0C, 0x00, // .
+		0x60, 0x30, 0x18, 0x0C, 0x06, 0x03, 0x01, 0x00, // /
+		0x3E, 0x63, 0x73, 0x7B, 0x6F, 0x67, 0x3E, 0x00, // 0
+		0x0C, 0x0E, 0x0C, 0x0C, 0x0C, 0x0C, 0x3F, 0x00, // 1
+		0x1E, 0x33, 0x30, 0x1C, 0x06, 0x33, 0x3F, 0x00, // 2
+		0x1E, 0x33, 0x30, 0x1C, 0x30, 0x33, 0x1E, 0x00, // 3
+		0x38, 0x3C, 0x36, 0x33, 0x7F, 0x30, 0x78, 0x00, // 4
+		0x3F, 0x03, 0x1F, 0x30, 0x30, 0x33, 0x1E, 0x00, // 5
+		0x1C, 0x06, 0x03, 0x1F, 0x33, 0x33, 0x1E, 0x00, // 6
+		0x3F, 0x33, 0x30, 0x18, 0x0C, 0x0C, 0x0C, 0x00, // 7
+		0x1E, 0x33, 0x33, 0x1E, 0x33, 0x33, 0x1E, 0x00, // 8
+		0x1E, 0x33, 0x33, 0x3E, 0x30, 0x18, 0x0E, 0x00, // 9
+		0x00, 0x0C, 0x0C, 0x00, 0x00, 0x0C, 0x0C, 0x00, // :
+		0x00, 0x0C, 0x0C, 0x00, 0x00, 0x0C, 0x0C, 0x06, // ;
+		0x18, 0x0C, 0x06, 0x03, 0x06, 0x0C, 0x18, 0x00, // <
+		0x00, 0x00, 0x3F, 0x00, 0x00, 0x3F, 0x00, 0x00, // =
+		0x06, 0x0C, 0x18, 0x30, 0x18, 0x0C, 0x06, 0x00, // >
+		0x1E, 0x33, 0x30, 0x18, 0x0C, 0x00, 0x0C, 0x00, // ?
+		0x3E, 0x63, 0x7B, 0x7B, 0x7B, 0x03, 0x1E, 0x00, // @
+		0x0C, 0x1E, 0x33, 0x33, 0x3F, 0x33, 0x33, 0x00, // A
+		0x3F, 0x66, 0x66, 0x3E, 0x66, 0x66, 0x3F, 0x00, // B
+		0x3C, 0x66, 0x03, 0x03, 0x03, 0x66, 0x3C, 0x00, // C
+		0x1F, 0x36, 0x66, 0x66, 0x66, 0x36, 0x1F, 0x00, // D
+		0x7F, 0x46, 0x16, 0x1E, 0x16, 0x46, 0x7F, 0x00, // E
+		0x7F, 0x46, 0x16, 0x1E, 0x16, 0x06, 0x0F, 0x00, // F
+		0x3C, 0x66, 0x03, 0x03, 0x73, 0x66, 0x7C, 0x00, // G
+		0x33, 0x33, 0x33, 0x3F, 0x33, 0x33, 0x33, 0x00, // H
+		0x1E, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0x1E, 0x00, // I
+		0x78, 0x30, 0x30, 0x30, 0x33, 0x33, 0x1E, 0x00, // J
+		0x67, 0x66, 0x36, 0x1E, 0x36, 0x66, 0x67, 0x00, // K
+		0x0F, 0x06, 0x06, 0x06, 0x46, 0x66, 0x7F, 0x00, // L
+		0x63, 0x77, 0x7F, 0x7F, 0x6B, 0x63, 0x63, 0x00, // M
+		0x63, 0x67, 0x6F, 0x7B, 0x73, 0x63, 0x63, 0x00, // N
+		0x1C, 0x36, 0x63, 0x63, 0x63, 0x36, 0x1C, 0x00, // O
+		0x3F, 0x66, 0x66, 0x3E, 0x06, 0x06, 0x0F, 0x00, // P
+		0x1E, 0x33, 0x33, 0x33, 0x3B, 0x1E, 0x38, 0x00, // Q
+		0x3F, 0x66, 0x66, 0x3E, 0x36, 0x66, 0x67, 0x00, // R
+		0x1E, 0x33, 0x07, 0x0E, 0x38, 0x33, 0x1E, 0x00, // S
+		0x3F, 0x2D, 0x0C, 0x0C, 0x0C, 0x0C, 0x1E, 0x00, // T
+		0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x3F, 0x00, // U
+		0x33, 0x33, 0x33, 0x33, 0x33, 0x1E, 0x0C, 0x00, // V
+		0x63, 0x63, 0x63, 0x6B, 0x7F, 0x77, 0x63, 0x00, // W
+		0x63, 0x63, 0x36, 0x1C, 0x1C, 0x36, 0x63, 0x00, // X
+		0x33, 0x33, 0x33, 0x1E, 0x0C, 0x0C, 0x1E, 0x00, // Y
+		0x7F, 0x63, 0x31, 0x18, 0x4C, 0x66, 0x7F, 0x00, // Z
+		0x1E, 0x06, 0x06, 0x06, 0x06, 0x06, 0x1E, 0x00, // [
+		0x03, 0x06, 0x0C, 0x18, 0x30, 0x60, 0x40, 0x00, // backslash
+		0x1E, 0x18, 0x18, 0x18, 0x18, 0x18, 0x1E, 0x00, // ]
+		0x08, 0x1C, 0x36, 0x63, 0x00, 0x00, 0x00, 0x00, // ^
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, // _
+		0x0C, 0x0C, 0x18, 0x00, 0x00, 0x00, 0x00, 0x00, // `
+		0x00, 0x00, 0x1E, 0x30, 0x3E, 0x33, 0x6E, 0x00, // a
+		0x07, 0x06, 0x06, 0x3E, 0x66, 0x66, 0x3B, 0x00, // b
+		0x00, 0x00, 0x1E, 0x33, 0x03, 0x33, 0x1E, 0x00, // c
+		0x38, 0x30, 0x30, 0x3E, 0x33, 0x33, 0x6E, 0x00, // d
+		0x00, 0x00, 0x1E, 0x33, 0x3F, 0x03, 0x1E, 0x00, // e
+		0x1C, 0x36, 0x06, 0x0F, 0x06, 0x06, 0x0F, 0x00, // f
+		0x00, 0x00, 0x6E, 0x33, 0x33, 0x3E, 0x30, 0x1F, // g
+		0x07, 0x06, 0x36, 0x6E, 0x66, 0x66, 0x67, 0x00, // h
+		0x0C, 0x00, 0x0E, 0x0C, 0x0C, 0x0C, 0x1E, 0x00, // i
+		0x30, 0x00, 0x30, 0x30, 0x30, 0x33, 0x33, 0x1E, // j
+		0x07, 0x06, 0x66, 0x36, 0x1E, 0x36, 0x67, 0x00, // k
+		0x0E, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0x1E, 0x00, // l
+		0x00, 0x00, 0x33, 0x7F, 0x7F, 0x6B, 0x63, 0x00, // m
+		0x00, 0x00, 0x1F, 0x33, 0x33, 0x33, 0x33, 0x00, // n
+		0x00, 0x00, 0x1E, 0x33, 0x33, 0x33, 0x1E, 0x00, // o
+		0x00, 0x00, 0x3B, 0x66, 0x66, 0x3E, 0x06, 0x0F, // p
+		0x00, 0x00, 0x6E, 0x33, 0x33, 0x3E, 0x30, 0x78, // q
+		0x00, 0x00, 0x3B, 0x6E, 0x66, 0x06, 0x0F, 0x00, // r
+		0x00, 0x00, 0x3E, 0x03, 0x1E, 0x30, 0x1F, 0x00, // s
+		0x08, 0x0C, 0x3E, 0x0C, 0x0C, 0x2C, 0x18, 0x00, // t
+		0x00, 0x00, 0x33, 0x33, 0x33, 0x33, 0x6E, 0x00, // u
+		0x00, 0x00, 0x33, 0x33, 0x33, 0x1E, 0x0C, 0x00, // v
+		0x00, 0x00, 0x63, 0x6B, 0x7F, 0x7F, 0x36, 0x00, // w
+		0x00, 0x00, 0x63, 0x36, 0x1C, 0x36, 0x63, 0x00, // x
+		0x00, 0x00, 0x33, 0x33, 0x33, 0x3E, 0x30, 0x1F, // y
+		0x00, 0x00, 0x3F, 0x19, 0x0C, 0x26, 0x3F, 0x00, // z
+		0x38, 0x0C, 0x0C, 0x07, 0x0C, 0x0C, 0x38, 0x00, // {
+		0x18, 0x18, 0x18, 0x00, 0x18, 0x18, 0x18, 0x00, // |
+		0x07, 0x0C, 0x0C, 0x38, 0x0C, 0x0C, 0x07, 0x00, // }
+		0x6E, 0x3B, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // ~
+	};
+
+	// The ramp in hand, as characters, already sorted by ink.
+	private static int[] ramp;
+
+	// The picture as characters: each cell of the output is one glyph, and
+	// which glyph is decided by how much ink it puts down against the cell's
+	// own tone. The cell is the font's 8x8 square scaled by `glyph`, so the
+	// output is a whole number of characters across and down.
+	private static void Ascii(double[] px, int w, int h, List<Color> palette, int[] index)
+	{
+		int cell = 8 * glyph;
+		int cols = w / cell;
+		int rows = h / cell;
+
+		// Everything a glyph does not ink is the paper, which is also what
+		// fills the strip the grid does not reach when the output is not a
+		// whole number of cells across.
+		for (int i = 0; i < index.Length; i++)
+		{
+			index[i] = 0;
+		}
+
+		for (int cy = 0; cy < rows; cy++)
+		{
+			for (int cx = 0; cx < cols; cx++)
+			{
+				// One character stands for the average of its own cell. The
+				// glyph is the tone, and a tone read from anywhere but the
+				// whole cell would make the characters depend on where the
+				// picture happened to fall against the grid.
+				double sum = 0.0;
+				for (int y = cy * cell; y < (cy + 1) * cell; y++)
+				{
+					int o = (y * w + cx * cell) * 3;
+					for (int x = 0; x < cell; x++)
+					{
+						sum += Luma(px[o], px[o + 1], px[o + 2]);
+						o += 3;
+					}
+				}
+
+				int k = (int)Math.Round(sum / (cell * cell) * (ramp.Length - 1));
+				if (k < 0)
+				{
+					k = 0;
+				}
+				if (k > ramp.Length - 1)
+				{
+					k = ramp.Length - 1;
+				}
+				Glyph(ramp[k], index, w, cx * cell, cy * cell, cell);
+			}
+		}
+	}
+
+	// One character, at the cell's corner, at whatever integer scale the cell
+	// is the font's 8x8 times.
+	private static void Glyph(int ch, int[] index, int w, int ox, int oy, int cell)
+	{
+		int s = cell / 8;
+		int g = (ch - 0x20) * 8;
+
+		for (int y = 0; y < 8; y++)
+		{
+			int bits = FONT8X8[g + y];
+			if (bits == 0)
+			{
+				continue;
+			}
+			for (int x = 0; x < 8; x++)
+			{
+				if ((bits & (0x80 >> x)) == 0)
+				{
+					continue;
+				}
+				// One pixel of the glyph is an s x s square of the output.
+				for (int sy = 0; sy < s; sy++)
+				{
+					int o = (oy + y * s + sy) * w + ox + x * s;
+					for (int sx = 0; sx < s; sx++)
+					{
+						index[o + sx] = 1;
+					}
+				}
+			}
+		}
+	}
+
+	// How much of a glyph's 64 pixels is ink, as a fraction: the tone the
+	// character stands for.
+	private static double Ink(int ch)
+	{
+		int g = (ch - 0x20) * 8;
+		int n = 0;
+		for (int i = 0; i < 8; i++)
+		{
+			int bits = FONT8X8[g + i];
+			while (bits != 0)
+			{
+				n += bits & 1;
+				bits >>= 1;
+			}
+		}
+		return n / 64.0;
+	}
+
+	// The ramp's characters, sorted by ink. Sorting is what keeps the order a
+	// ramp is written in from being a setting: in this font "-" is lighter
+	// than ":", and "%" lighter than "*", so the classic ramp typed the way
+	// everyone types it is not monotonic, and a ramp used as typed would run
+	// backwards over part of its range.
+	private static int[] Ramp(string chars)
+	{
+		int[] order = new int[chars.Length];
+		double[] ink = new double[chars.Length];
+		for (int i = 0; i < chars.Length; i++)
+		{
+			order[i] = chars[i];
+			ink[i] = Ink(chars[i]);
+		}
+
+		// Insertion sort: a ramp is tens of characters, and this is the one
+		// sort here that is stable, which two characters of equal ink need.
+		for (int i = 1; i < order.Length; i++)
+		{
+			int ch = order[i];
+			double v = ink[i];
+			int j = i - 1;
+			while (j >= 0 && ink[j] > v)
+			{
+				order[j + 1] = order[j];
+				ink[j + 1] = ink[j];
+				j--;
+			}
+			order[j + 1] = ch;
+			ink[j + 1] = v;
+		}
+		return order;
+	}
+
+	// ASCII draws in two colours whatever palette is in hand: the glyphs in
+	// the lightest entry and the paper in the darkest. Chosen by luminance
+	// rather than by position, so a custom list typed light first still comes
+	// out with the glyphs on the dark one.
+	private static List<Color> AsciiPair(List<Color> p)
+	{
+		Color dark = p[0];
+		Color light = p[0];
+		foreach (Color c in p)
+		{
+			if (Luma(c) < Luma(dark))
+			{
+				dark = c;
+			}
+			if (Luma(c) > Luma(light))
+			{
+				light = c;
+			}
+		}
+
+		List<Color> pair = new List<Color>();
+		pair.Add(dark);
+		pair.Add(light);
+		return pair;
+	}
+
+	// The cell the characters are drawn in: the largest whole number of them
+	// that fits the cell the rest of the engine would have used. Floored, so
+	// the grid never grows past the size that was already fitted.
+	private static Size FitAscii(Size cell)
+	{
+		int g = 8 * glyph;
+		return new Size(
+			Math.Max(1, cell.Width / g) * g,
+			Math.Max(1, cell.Height / g) * g);
 	}
 
 	// ============================================================ pixelate

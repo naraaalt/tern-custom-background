@@ -24,6 +24,8 @@ and shows a live preview of the dithered result.
   custom list, or a retro preset — Game Boy, CGA / EGA, PICO-8, Commodore 64 —
   by error diffusion (13 kernels), Bayer matrix, blue noise, Knoll, Riemersma,
   threshold or nearest.
+- Or drawn as characters: an 8×8 bitmap font at 1–8× cell size, on a ramp from
+  two glyphs to seventy, in two colours taken from whatever palette is set.
 - Fit (fit to screen, fill, stretch, tile), opacity, brightness, contrast,
   block size, pixel scale.
 - **An animated GIF moves.** The frames are rendered into one grid image and
