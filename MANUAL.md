@@ -76,7 +76,7 @@ plugin reload` does it straight away (see the engine's stamp below).
 | Matrix | 2×2, 4×4, 8×8, 16×16 (Bayer), or 2×2 … 16×16, blue noise (Knoll) | 8×8 |
 | Block size | 1–25 px, blocks up the dithered result | 1 |
 | Smooth blocks | on/off, average each block instead of sampling its middle | off |
-| Palette | black and white, 4/8/16 greys, the image's own colours, custom `#rrggbb` list | black and white |
+| Palette | black and white, 4/8/16 greys, the image's own colours, custom `#rrggbb` list, or a retro preset: Game Boy, CGA / EGA, PICO-8, Commodore 64 | black and white |
 | Colours to take | 2–16, how many the image's own palette reads | 8 |
 | Chosen by | most used, median cut | most used |
 | Pixel scale | 1–16, divides the source before the dither | 1 |
@@ -403,6 +403,20 @@ and the palette have to agree about what the picture looks like.
 The block publishes the colours it read into the Custom colours row, so
 switching to that palette starts from the picture rather than from the
 defaults.
+
+**The retro presets are custom lists the block owns.** Game Boy (the DMG's
+four greens), CGA / EGA (the IBM sixteen as post-CGA hardware and emulators
+draw them), PICO-8 and Commodore 64 (the VIC-II's sixteen) travel to the engine
+as an ordinary `custom:` list, so the engine has no notion of a preset and
+nothing in it had to learn about them. They are the reference sets for those
+machines, taken from what documents them rather than eyeballed.
+
+While a preset is chosen the Custom colours row shows the preset's own list and
+says so, and the user's custom list is left underneath it, untouched: switching
+back to Custom colours brings their colours back. The engine's dithers are all
+order-independent — `Pair` picks the two nearest entries by distance and
+`Knoll` sorts its own walk by luminance — so the order the colours are written
+in is only how they read in the row.
 
 **The cut is the built-in palette's.** `bw` is quantized as a cut at
 `--threshold`, not by distance, so `bw` plus `threshold` reads as a hard

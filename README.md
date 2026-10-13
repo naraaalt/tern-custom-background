@@ -20,9 +20,10 @@ and shows a live preview of the dithered result.
 
 - Any image becomes the window's background. Choose it with the `Choose…`
   button or paste a path into the Image file row.
-- Reduced to black and white, 4/8/16 greys, the picture's own colours, or a
-  custom list — by error diffusion (13 kernels), Bayer matrix, blue noise,
-  Knoll, Riemersma, threshold or nearest.
+- Reduced to black and white, 4/8/16 greys, the picture's own colours, a
+  custom list, or a retro preset — Game Boy, CGA / EGA, PICO-8, Commodore 64 —
+  by error diffusion (13 kernels), Bayer matrix, blue noise, Knoll, Riemersma,
+  threshold or nearest.
 - Fit (fit to screen, fill, stretch, tile), opacity, brightness, contrast,
   block size, pixel scale.
 - **An animated GIF moves.** The frames are rendered into one grid image and

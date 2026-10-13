@@ -109,7 +109,73 @@ local ALGOS = {
 }
 local MATRICES = { "2", "4", "8", "16" }
 local PATTERNS = { "2", "4", "8", "16", "bluenoise" }
+
+-- Retro palettes, in the order the menu lists them. Each is the reference set
+-- for the machine, taken from what documents it rather than eyeballed: the
+-- DMG's four greens, the canonical CGA/EGA sixteen that post-CGA hardware and
+-- emulators draw, PICO-8's sixteen, and the sixteen c64-wiki lists for the
+-- VIC-II. They travel to the engine as an ordinary `custom:` list, so the
+-- engine has no notion of a preset and nothing in it has to know about them.
+--
+-- The engine's dithers are all order-independent - `Pair` picks the two
+-- nearest entries by distance and `Knoll` sorts its own walk by luminance - so
+-- the order here is only how the colours read in the row.
+local PRESETS = {
+	gb = {
+		label = "Game Boy",
+		detail = "The DMG's four greens.",
+		colors = "#0f380f,#306230,#8bac0f,#9bbc0f",
+	},
+	cga = {
+		label = "CGA / EGA",
+		detail = "The IBM sixteen, as emulators draw them.",
+		colors = "#000000,#0000aa,#00aa00,#00aaaa,#aa0000,#aa00aa,#aa5500,#aaaaaa"
+			.. ",#555555,#5555ff,#55ff55,#55ffff,#ff5555,#ff55ff,#ffff55,#ffffff",
+	},
+	pico8 = {
+		label = "PICO-8",
+		detail = "The fantasy console's sixteen.",
+		colors = "#000000,#1d2b53,#7e2553,#008751,#ab5236,#5f574f,#c2c3c7,#fff1e8"
+			.. ",#ff004d,#ffa300,#ffec27,#00e436,#29adff,#83769c,#ff77a8,#ffccaa",
+	},
+	c64 = {
+		label = "Commodore 64",
+		detail = "The VIC-II's sixteen.",
+		colors = "#000000,#ffffff,#880000,#aaffee,#cc44cc,#00cc55,#0000aa,#eeee77"
+			.. ",#dd8855,#664400,#ff7777,#333333,#777777,#aaff66,#0088ff,#bbbbbb",
+	},
+}
+local PRESET_NAMES = { "gb", "cga", "pico8", "c64" }
+
 local PALETTES = { "bw", "gray4", "gray8", "gray16", "auto", "custom" }
+for _, name in PRESET_NAMES do
+	table.insert(PALETTES, name)
+end
+
+-- The menu, built once: the built-in palettes, then the presets. Kept beside
+-- PRESETS so a preset cannot be added without appearing in the row.
+local PALETTE_OPTIONS = {
+	{ value = "bw", label = "Black and white" },
+	{ value = "gray4", label = "4 greys" },
+	{ value = "gray8", label = "8 greys" },
+	{ value = "gray16", label = "16 greys" },
+	{ value = "auto", label = "Image colours", detail = "The colours the picture is made of." },
+	{ value = "custom", label = "Custom colours" },
+}
+for _, name in PRESET_NAMES do
+	local p = PRESETS[name]
+	table.insert(PALETTE_OPTIONS, { value = name, label = p.label, detail = p.detail })
+end
+
+-- The colours a preset palette stands for, or nil for the palettes that are
+-- not presets. The Custom colours row shows these rather than the user's own
+-- list while a preset is in use, so the row says which colours are in effect
+-- without the preset overwriting a custom list the user typed.
+local function preset_colors(name: string): string?
+	local p = PRESETS[name]
+	return if p ~= nil then p.colors else nil
+end
+
 local METHODS = { "popularity", "median" }
 local FITS = { "cover", "contain", "stretch", "tile" }
 
@@ -341,6 +407,10 @@ local function render_argv(s: { [string]: any }, out: string): { string }
 	local palette = s.palette
 	if palette == "custom" then
 		palette = "custom:" .. s.colors
+	elseif PRESETS[palette] ~= nil then
+		-- A preset is a custom list that the block owns, so the engine keeps
+		-- reading one kind of palette and the colours stay in one place.
+		palette = "custom:" .. PRESETS[palette].colors
 	end
 
 	local argv: { string } = {
@@ -983,15 +1053,7 @@ local function rows_for(state: State): { { [string]: any } }
 				label = "Palette",
 				changed = s.palette ~= DEFAULTS.palette,
 				defaultLabel = "Black and white",
-				control = { k = "choice", value = s.palette, options = {
-					{ value = "bw", label = "Black and white" },
-					{ value = "gray4", label = "4 greys" },
-					{ value = "gray8", label = "8 greys" },
-					{ value = "gray16", label = "16 greys" },
-					{ value = "auto", label = "Image colours",
-						detail = "The colours the picture is made of." },
-					{ value = "custom", label = "Custom colours" },
-				} },
+				control = { k = "choice", value = s.palette, options = PALETTE_OPTIONS },
 			},
 			{
 				id = "extract",
@@ -1013,12 +1075,16 @@ local function rows_for(state: State): { { [string]: any } }
 			{
 				id = "colors",
 				label = "Custom colours",
-				hint = "#rrggbb, comma separated. Used by the Custom palette.",
+				hint = "#rrggbb, comma separated. Used by the Custom palette; a "
+					.. "retro palette above supplies its own list, shown here.",
 				-- The Image colours palette fills this row in from the render,
 				-- so under it the row shows the render's answer rather than a
-				-- setting to edit.
-				disabled = if s.palette == "auto" then "Read from the image." else nil,
-				control = { k = "text", value = s.colors, mono = true },
+				-- setting to edit; a retro palette shows the colours it stands
+				-- for, and its own list is left alone underneath.
+				disabled = if s.palette == "auto" then "Read from the image."
+					elseif preset_colors(s.palette) ~= nil then "Set by the palette."
+					else nil,
+				control = { k = "text", value = preset_colors(s.palette) or s.colors, mono = true },
 			},
 			{
 				id = "scale",
