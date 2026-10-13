@@ -441,6 +441,32 @@ and the preview is the render itself rather than a second one.
   model, so editing a path means pressing Backspace or Home first.
 - **WebP needs a system codec.** GDI+ decodes JPEG, PNG, BMP, GIF and TIFF.
   A WebP without a codec fails with `cannot decode`.
+- **Only GIF animates, and an APNG does not even fail.** An animated PNG is
+  read as its first frame and rendered as a still, with no message: GDI+
+  ignores the `acTL` chunk that makes it an animation. Anything animated that
+  is not a GIF is a still here.
+- **A delay of one centisecond plays at 10 ms, not the 100 ms browsers use.**
+  Browsers treat anything under 2 cs as "as fast as possible" and clamp it to
+  100 ms; this reads the file literally, so such a GIF runs ten times faster
+  than it looks in a browser. A file that says 1 renders `delays=10`. The
+  clamp is one line in `FrameDelays` if browser parity is wanted.
+- **Each delay is a multiple of 10 ms, and only each delay.** A GIF stores
+  hundredths of a second, so no single frame can be 16.7 ms. A uniform rate is
+  still expressible as a repeating cycle — 60 fps as 10/20/20 ms, 30 fps as
+  40/30/30 — and the plugin reproduces whatever cycle the file used, because it
+  carries each frame's own delay rather than a rate. What the format rules out
+  is an author who wanted a rate and wrote it into every frame: 16.7 ms per
+  frame is not a value that exists. The 31-frame GIF this was built against
+  runs its steady state at exactly 30 fps as a repeating 40/30/30 ms cycle,
+  with a 30 ms first frame; the 31 frames sum to 1030 ms. That is one file's
+  choice, not a rule about 30 fps GIFs.
+- **A GIF is read as whole frames, and that holds.** Partial frames and
+  disposal methods 1 (leave) and 2 (restore to background) composite the way a
+  browser composites them, and a transparent index shows the frame below
+  through. Verified by building GIFs for each case: a half-width partial frame
+  over a white frame comes back black on the left and white on the right, and
+  the same file with disposal 2 and a white background comes back white
+  throughout.
 - **An animation is always `cover`, and its frames share one palette.** The
   frames are one image, so only the crop that shows one cell at a time can be
   drawn; and the palette is read off the first frame, because a palette per

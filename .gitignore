@@ -6,3 +6,6 @@ engine/dither.stamp
 
 # Not published: a sample picture is not ours to redistribute.
 wp-test.jpg
+
+# Local only: kept on disk, not published.
+README.md
